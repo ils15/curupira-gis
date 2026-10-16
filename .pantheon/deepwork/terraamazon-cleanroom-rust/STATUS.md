@@ -319,6 +319,56 @@ também o regex de extração de `GDAL_VERSION` (formatos antigo/novo de `vcpkg 
 erro imprime o listing — seria a próxima falha silenciosa). `GDAL_LIB_DIR` + `GDAL_VERSION`
 mantidos (contrato do `gdal-sys` 0.12 verificado na decisão 2 da Fase 4).
 
+### Run #2 (2026-10-16, commit 79af637) — workflow `ci`
+
+| Job | Resultado | Detalhe |
+|-----|-----------|---------|
+| `linux` (fmt + clippy + test, sem PG) | ✅ passou | — |
+| `linux-pg` (pg16/postgis 3.4, testes gated) | ❌ **falhou** (~1 min) | Ver root cause abaixo — **correção aplicada localmente** |
+| `windows` (msvc + GDAL vcpkg) | ⏳ pendente | Ainda em execução no momento do diagnóstico |
+
+#### Root cause do `linux-pg` na run #2
+
+**Não** era service/healthcheck (container `postgis/postgis:16-3.4` ficou healthy
+em ~6 s), **nem** DSN/env (`TA_PG_DSN` correto, 3 testes gated passaram), **nem**
+falta de setup: a extensão PostGIS e as migrações subiram via `init_schema()`.
+
+Causa real: `mvt_tile_tem_estrutura_valida_e_versao_2` — decoder protobuf
+escrito à mão em `crates/ta-db/tests/mvt_integration.rs` (`decode_layer`) fazia
+`break` no primeiro tag desconhecido. O protobuf-c do PostGIS serializa a
+mensagem `Layer` com `name` (campo 1) primeiro e `version` (campo 15) por
+último, após features/keys/values/extent → `version` nunca era alcançado
+(`left: None, right: Some(2)` em `mvt_integration.rs:245`).
+
+Esse caminho nunca havia rodado antes: o harness conda-forge compila PostGIS
+**sem** protobuf-c (`postgis_full_version()` sem `LIBPROTOBUF`), então os
+testes de MVT pulavam localmente — o CI (imagem com protobuf-c) é a primeira
+execução real, e ela reprovou.
+
+#### Correção
+
+- `decode_layer` reescrito como walker protobuf correto: lê tags como varint,
+  e **pula** campos desconhecidos pelo wire type (0/1/2/5) em qualquer ordem.
+- Teste de regressão ungated novo:
+  `decode_layer_pula_campos_e_acha_versao_apos_desconhecidos` (bytes
+  sintéticos com ordem adversa: name → extent → features → version).
+
+#### Verificação local (simulando o fluxo do CI)
+
+- Cluster conda pg16/postgis 3.4 (`scripts/test-pg.sh --no-tests`), DSN no
+  mesmo formato do workflow (`postgres://ta:ta@127.0.0.1:<porta>/ta`).
+- `TA_TEST_PG=1 cargo test --workspace` completo: **todos os binários verdes**
+  (mvt_integration 5 ✅ incl. regressão — MVT real continua skip no harness
+  conda por falta de protobuf-c; pg_integration 6 ✅ contra PG real).
+- `cargo fmt --check` ✅ · `cargo clippy --workspace --all-targets -D warnings` ✅.
+
+#### Risco para a run #3
+
+`cargo test` aborta no primeiro binário reprovado, então `pg_integration`
+real (via service) **nunca chegou a rodar** nas runs #1–2. Com o decoder
+corrigido ele executará no CI pela primeira vez — verde localmente contra
+PG real (harness), mas é a parte não comprovada em CI até a próxima run.
+
 ### Pendências pós-push (Fase 4)
 
 1. Acompanhar run de CI — **principalmente job `windows`** (vcpkg/gdal-sys: primeira prova real; `actionlint` não existia no host, validação foi manual).

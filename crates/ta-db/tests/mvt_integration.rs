@@ -134,53 +134,129 @@ fn first_layer_message(tile: &[u8]) -> Option<&[u8]> {
     Some(&rest[..len as usize])
 }
 
+/// Lê um varint protobuf a partir de `i`; devolve `(valor, próximo índice)`.
+fn read_varint(buf: &[u8], mut i: usize) -> Option<(u64, usize)> {
+    let mut v = 0u64;
+    let mut shift = 0u32;
+    while i < buf.len() {
+        let b = buf[i];
+        i += 1;
+        v |= u64::from(b & 0x7F) << shift;
+        if b & 0x80 == 0 {
+            return Some((v, i));
+        }
+        shift += 7;
+        if shift > 63 {
+            return None; // varint > 64 bits: stream malformado
+        }
+    }
+    None
+}
+
+/// Avança `i` sobre o payload de um campo com o wire type dado.
+/// Devolve `false` se o stream termina no meio do campo (malformado).
+fn skip_field(buf: &[u8], i: &mut usize, wire: u64) -> bool {
+    match wire {
+        0 => match read_varint(buf, *i) {
+            Some((_, next)) => {
+                *i = next;
+                true
+            }
+            None => false,
+        },
+        1 if buf.len() >= *i + 8 => {
+            *i += 8;
+            true
+        }
+        1 => false,
+        2 => match read_varint(buf, *i) {
+            Some((len, start)) if buf.len() >= start.saturating_add(len as usize) => {
+                *i = start + len as usize;
+                true
+            }
+            _ => false,
+        },
+        5 if buf.len() >= *i + 4 => {
+            *i += 4;
+            true
+        }
+        5 => false,
+        _ => false, // wire 3/4 (groups) não existe no MVT
+    }
+}
+
 /// Nome da camada dentro da mensagem Layer (campo 1) e versão (campo 15).
+///
+/// Protobuf NÃO garante ordem de serialização por número de campo: o
+/// protobuf-c do PostGIS emite `name` (1) primeiro e `version` (15) por
+/// último, após features/keys/values/extent. O walker então precisa PULAR
+/// campos desconhecidos pelo wire type (causa raiz do vermelho do job
+/// linux-pg na 2ª run de CI — a versão antiga fazia `break` no primeiro
+/// tag não reconhecido e nunca chegava ao `version`).
 fn decode_layer(layer: &[u8]) -> (Option<String>, Option<u64>) {
     let mut name = None;
     let mut version = None;
     let mut i = 0;
     while i < layer.len() {
-        let tag = layer[i];
-        i += 1;
-        match tag {
-            0x0A => {
+        // Tag = varint (nº do campo << 3 | wire type).
+        let (tag, next) = match read_varint(layer, i) {
+            Some(x) => x,
+            None => break,
+        };
+        i = next;
+        let field = tag >> 3;
+        let wire = tag & 0x07;
+        match (field, wire) {
+            (1, 2) => {
                 // name (field 1, wire 2): varint len + bytes
-                let mut len = 0u64;
-                let mut shift = 0;
-                while i < layer.len() {
-                    let b = layer[i];
-                    i += 1;
-                    len |= u64::from(b & 0x7F) << shift;
-                    if b & 0x80 == 0 {
-                        break;
-                    }
-                    shift += 7;
+                if let Some((len, start)) = read_varint(layer, i) {
+                    let end = start.saturating_add(len as usize).min(layer.len());
+                    name = Some(String::from_utf8_lossy(&layer[start..end]).into_owned());
+                    i = start.saturating_add(len as usize);
+                } else {
+                    break;
                 }
-                name = Some(
-                    String::from_utf8_lossy(&layer[i..(i + len as usize).min(layer.len())])
-                        .into_owned(),
-                );
-                i += len as usize;
             }
-            0x78 => {
+            (15, 0) => {
                 // version (field 15, wire 0): varint
-                let mut v = 0u64;
-                let mut shift = 0;
-                while i < layer.len() {
-                    let b = layer[i];
-                    i += 1;
-                    v |= u64::from(b & 0x7F) << shift;
-                    if b & 0x80 == 0 {
-                        break;
+                match read_varint(layer, i) {
+                    Some((v, next)) => {
+                        version = Some(v);
+                        i = next;
                     }
-                    shift += 7;
+                    None => break,
                 }
-                version = Some(v);
             }
-            _ => break, // outros campos (keys/values/features): fora do escopo
+            _ => {
+                // features (2) / keys (3) / values (4) / extent (5): fora do
+                // escopo, mas precisam ser pulados corretamente para o walker
+                // alcançar campos posteriores.
+                if !skip_field(layer, &mut i, wire) {
+                    break;
+                }
+            }
         }
     }
     (name, version)
+}
+
+/// Regressão do job `linux-pg` (run #2 de CI): o walker precisa pular
+/// campos intermediários (extent/features) e achar `version` (15) mesmo
+/// quando ele NÃO é o primeiro campo da mensagem Layer.
+#[test]
+fn decode_layer_pula_campos_e_acha_versao_apos_desconhecidos() {
+    // Layer: name="abc" (1) · extent=255 (5, varint 2 bytes) ·
+    // features (2, wire 2, payload qualquer) · version=2 (15) — ordem
+    // propositalmente adversa à declaração do .proto.
+    let bytes = [
+        0x0A, 0x03, b'a', b'b', b'c', // name = "abc"
+        0x28, 0xFF, 0x01, // extent = 255
+        0x12, 0x02, 0xDE, 0xAD, // features (len 2)
+        0x78, 0x02, // version = 2
+    ];
+    let (name, version) = decode_layer(&bytes);
+    assert_eq!(name.as_deref(), Some("abc"));
+    assert_eq!(version, Some(2));
 }
 
 #[tokio::test]
