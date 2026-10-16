@@ -1,0 +1,190 @@
+name: release
+
+# Release Curupira GIS — disparada por tag `v*` (convenção: tag == versão do
+# workspace, ex.: v0.1.0 == Cargo.toml [workspace.package] version).
+#
+# DECISÃO DE PACKAGING (2026-10-16, documentada no README "Releases"):
+# workflow MANUAL com matrix build em vez de cargo-dist. Motivos: (a) o CI do
+# cargo-dist é gerado por `dist init`, que não pode ser produzido nem
+# validado no host de desenvolvimento; (b) matrix de 2 alvos não justifica a
+# maquinaria de 20 alvos; (c) este workflow é 100% auditável e pinado por
+# SHA. Reavaliar cargo-dist pós-alpha.
+#
+# GATE HUMANO MANTIDO: a release é sempre criada como **draft**; publicar
+# exige um humano marcando "Publish" na página da release.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Actions pinadas por SHA de commit (review F0-N):
+#   actions/checkout@v6.1.0
+#   actions-rust-lang/setup-rust-toolchain@v1.17.0
+#   actions/cache@v6.1.0
+#   actions/upload-artifact@v4.6.1
+#   actions/download-artifact@v4.3.0
+
+jobs:
+  build-linux:
+    name: linux x86_64-gnu (tar.gz)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Instala toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+
+      - name: GDAL (link dinâmico)
+        run: sudo apt-get update && sudo apt-get install -y libgdal-dev
+
+      - name: Build release
+        run: cargo build --release --workspace
+
+      - name: Empacota tar.gz (curupira-gis + ta-cli)
+        run: |
+          mkdir -p dist/curupira-gis-"${GITHUB_REF_NAME}"-x86_64-unknown-linux-gnu
+          cp target/release/curupira-gis target/release/ta-cli \
+            dist/curupira-gis-"${GITHUB_REF_NAME}"-x86_64-unknown-linux-gnu/
+          cp README.md LICENSE-MIT LICENSE-APACHE NOTICE.md \
+            dist/curupira-gis-"${GITHUB_REF_NAME}"-x86_64-unknown-linux-gnu/
+          tar czf \
+            "dist/curupira-gis-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz" \
+            -C dist "curupira-gis-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+
+      - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: dist-linux
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build-windows:
+    name: windows x86_64-msvc (zip com GDAL embutida)
+    runs-on: windows-latest
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Instala toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+
+      - name: Cache binário do vcpkg
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vcpkg-bincache
+          key: vcpkg-gdal-x64-windows-v1
+          restore-keys: vcpkg-gdal-x64-windows-
+
+      - name: Instala GDAL (vcpkg clássico)
+        run: vcpkg install gdal:x64-windows
+
+      - name: Exporta GDAL_LIB_DIR e GDAL_VERSION p/ gdal-sys
+        shell: pwsh
+        run: |
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
+          $libDir = Join-Path $vcpkgRoot "installed\x64-windows\lib"
+          if (-not (Test-Path (Join-Path $libDir "gdal_i.lib"))) {
+            throw "gdal_i.lib não encontrado em $libDir"
+          }
+          $listing = (vcpkg list gdal) -join "`n"
+          $m = [regex]::Match($listing, "gdal\[core\]:x64-windows\s+([0-9]+\.[0-9]+\.[0-9]+)")
+          if (-not $m.Success) { throw "não consegui extrair a versão do GDAL de 'vcpkg list gdal'" }
+          "GDAL_LIB_DIR=$libDir"      | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "GDAL_VERSION=$($m.Groups[1].Value)" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+
+      - name: Build release
+        run: cargo build --release --workspace
+
+      - name: Empacota zip (exes + DLLs GDAL/PROJ + share)
+        shell: pwsh
+        run: |
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT; if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
+          $bin = Join-Path $vcpkgRoot "installed\x64-windows\bin"
+          $share = Join-Path $vcpkgRoot "installed\x64-windows\share"
+          $name = "curupira-gis-$($env:GITHUB_REF_NAME)-x86_64-pc-windows-msvc"
+          $stage = "dist\$name"
+          New-Item -ItemType Directory -Force -Path "$stage\share" | Out-Null
+          Copy-Item target\release\curupira-gis.exe $stage\
+          Copy-Item target\release\ta-cli.exe $stage\
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, NOTICE.md $stage\
+          # DLLs de runtime: copiamos o bin dir inteiro do triplet (gdal +
+          # dependências transitivas: proj, geos, sqlite, expat, ...). ~100 MB
+          # descompactado — aceito no alpha p/ garantir "extrair e rodar".
+          Copy-Item "$bin\*.dll" $stage\
+          # Dados de projeção/GDAL usados pelo main.rs (PROJ_LIB/GDAL_DATA
+          # apontam p/ <exe>\share automaticamente).
+          Copy-Item -Recurse "$share\proj" "$stage\share\proj"
+          Copy-Item -Recurse "$share\gdal" "$stage\share\gdal"
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+          Remove-Item -Recurse -Force $stage
+
+      - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: dist-windows
+          path: dist/*.zip
+          if-no-files-found: error
+
+  sbom:
+    name: SBOM CycloneDX (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Instala toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+
+      - name: cargo-cyclonedx
+        run: cargo install --locked cargo-cyclonedx
+
+      - name: Gera SBOM por crate (CycloneDX JSON 1.5)
+        # cargo-cyclonedx >=0.5 não tem --output-dir: escreve
+        # <crate>-<versão>.cdx.json ao lado do Cargo.toml de cada membro.
+        # Coletamos tudo em sbom/ para o artefato.
+        run: |
+          cargo cyclonedx --format json --spec-version 1.5
+          mkdir -p sbom
+          find . -name "*.cdx.json" -not -path "./target/*" -exec cp {} sbom/ \;
+          ls -la sbom/
+
+      - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: sbom
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+
+  release:
+    name: Draft GitHub Release (revisão humana publica)
+    needs: [build-linux, build-windows, sbom]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums sha256
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz *.zip *.cdx.json | tee SHA256SUMS
+
+      - name: Cria release DRAFT com artefatos + checksums + SBOM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --title "Curupira GIS $GITHUB_REF_NAME" \
+            --notes "Draft automático da tag ${GITHUB_REF_NAME}.
+          Inclui binários Linux (tar.gz, GDAL do sistema) e Windows (zip com
+          GDAL/PROJ embutidos), checksums SHA256SUMS e SBOM CycloneDX.
+          **Requer revisão humana antes de publicar.**" \
+            --verify-tag \
+            artifacts/*

@@ -1,0 +1,39 @@
+[package]
+name = "ta-gis"
+description = "IO geoespacial do terraamazon-cleanroom-rust: leitura/escrita vetorial e raster, normalização e derivados."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ta-core.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+geo-types.workspace = true
+
+# Depespesas ficam atrás de features — o build default continua enxuto.
+gdal = { workspace = true, optional = true }
+geojson = { workspace = true, optional = true }
+csv = { workspace = true, optional = true }
+geozero = { workspace = true, optional = true }
+flatgeobuf = { workspace = true, optional = true }
+ta-db = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+percent-encoding = { workspace = true, optional = true }
+
+[features]
+default = []
+gdal = ["dep:gdal"]
+geojson = ["dep:geojson"]
+csv = ["dep:csv"]
+# geozero é usado junto do flatgeobuf (escrita FGB via processadores geozero);
+# sozinho não expõe módulo público novo.
+geozero = ["dep:geozero"]
+flatgeobuf = ["dep:flatgeobuf", "dep:geozero"]
+# Export de features do banco (FeatureRepo) — consome ta-db.
+db = ["dep:ta-db"]
+# Cliente WMS 1.3.0 com cache em disco (reqwest async + TTL).
+wms = ["dep:reqwest", "dep:sha2", "dep:percent-encoding"]

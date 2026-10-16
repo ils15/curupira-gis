@@ -1,0 +1,41 @@
+{
+  "params": {
+    "seed": 42,
+    "n_polys": 10000,
+    "n_points": 50000
+  },
+  "files": [
+    {
+      "arquivo": "bench_polys.shp",
+      "sha256": "406af7afc4e031fb4ddad72486c3afc69cbc1c74f9da89a8b958f14b638ff217",
+      "bytes": 2964676,
+      "rows": 10000
+    },
+    {
+      "arquivo": "bench_points.csv",
+      "sha256": "a7ce5219d9dbc26aa3c06d54fa6876b0a1157e8bfd2739d44f73e0f54a020a9f",
+      "bytes": 2999749,
+      "rows": 50000
+    },
+    {
+      "arquivo": "bench_raster.tif",
+      "sha256": "6523b727d75415388b646b920e4f042bd0e062d7d02dd5d3c4f34187c403f8aa",
+      "bytes": 11432905,
+      "dims": [
+        1024,
+        1024,
+        4
+      ]
+    },
+    {
+      "arquivo": "bench_raster_stress.tif",
+      "sha256": "52daf9c434399c4d614681425eca3445e9aa234c6ae5d1634401a6fc7ac673b3",
+      "bytes": 120771351,
+      "dims": [
+        8192,
+        8192,
+        1
+      ]
+    }
+  ]
+}

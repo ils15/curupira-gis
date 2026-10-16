@@ -1,0 +1,29 @@
+# Rust
+/target
+
+# Ambiente / segredos
+.env
+.env.*
+!.env.example
+
+# BARRA CLEAN-ROOM: nunca commitar binários/artefatos do TerraAmazon legado.
+# Ver CONTRIBUTING.md — inspeção do binário legado é proibida.
+*.exe
+*.zip
+*.7z
+*.msi
+*.apk
+*.dll
+TerraAmazon*
+legacy/
+
+# SO / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Dados de bench (GERADOS — ver scripts/gen_bench_fixtures.py).
+# Somente o manifest.json fica versionado (determinismo auditável).
+testdata/bench/*
+!testdata/bench/manifest.json

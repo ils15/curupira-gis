@@ -1,0 +1,16 @@
+//! `ta-db` — persistência do terraamazon-cleanroom-rust.
+//!
+//! - [`pool`]: pool de conexões PostgreSQL/PostGIS (sqlx, tokio).
+//! - [`repo`]: traits de repositório async — um só contrato para PostGIS
+//!   (padrão) e GPKG offline (feature `offline-gpkg`, opt-in).
+//! - [`spatial`]: utilitários espaciais do banco (DDL, COPY BINARY, MVT).
+//!
+//! Banco primário: **PostgreSQL 16 + PostGIS 3.4**, SRID do projeto **4674**
+//! (coluna `geometry(Geometry,4674)` + índice GIST + CHECK de SRID — Fase 1).
+
+pub mod error;
+pub mod pool;
+pub mod repo;
+pub mod spatial;
+
+pub use error::{Error, Result};

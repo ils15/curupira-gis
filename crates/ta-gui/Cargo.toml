@@ -1,0 +1,44 @@
+[package]
+# Prefixo interno `ta-` é herança do desenvolvimento inicial
+# (terraamazon-cleanroom-rust); a marca pública é **Curupira GIS**.
+# O binário entregue ao usuário chama-se `curupira-gis`.
+name = "ta-gui"
+description = "Curupira GIS — aplicativo desktop (egui/eframe) sobre a trait MapView."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+eframe.workspace = true
+ta-core.workspace = true
+ta-db.workspace = true
+# GDAL (SHP/GeoJSON/GPKG + GeoTIFF) e CSV-XY são caminhos de import do GUI;
+# libgdal é link dinâmico (pré-requisito do host, ver README).
+ta-gis = { workspace = true, features = ["gdal", "csv"] }
+# Leitura direta da banda (downsample) p/ textura egui.
+gdal.workspace = true
+geo-types.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+sqlx.workspace = true
+time.workspace = true
+thiserror.workspace = true
+# Escaping de usuário/senha no DSN montado pelo diálogo de conexão.
+percent-encoding = { workspace = true }
+
+[dev-dependencies]
+
+# Binário renomeado do `ta-gui` para a marca pública (crate continua `ta-gui`
+# para não quebrar o grafo interno/benches). `cargo run -p ta-gui` continua
+# funcionando (único bin do crate).
+[[bin]]
+name = "curupira-gis"
+path = "src/main.rs"
+
+[[bench]]
+name = "map_render"
+harness = false

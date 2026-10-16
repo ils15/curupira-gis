@@ -1,0 +1,33 @@
+[package]
+# Prefixo interno `ta-` é herança do desenvolvimento inicial; marca pública:
+# **Curupira GIS** (ver README).
+name = "ta-cli"
+description = "Curupira GIS — CLI de import/export/migrate: import-vector, import-raster, export, list-layers, migrate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "ta-cli"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+ta-core.workspace = true
+ta-db.workspace = true
+ta-gis.workspace = true
+sqlx.workspace = true
+time.workspace = true
+tokio.workspace = true
+
+[features]
+# Defaults do CLI: IO completo + banco. WMS fica opt-in (`--features wms`).
+default = ["gdal", "csv", "geojson", "flatgeobuf", "db"]
+gdal = ["ta-gis/gdal"]
+csv = ["ta-gis/csv"]
+geojson = ["ta-gis/geojson"]
+flatgeobuf = ["ta-gis/flatgeobuf"]
+db = ["ta-gis/db"]
+wms = ["ta-gis/wms"]

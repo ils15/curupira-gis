@@ -1,0 +1,20 @@
+services:
+  postgis:
+    image: postgis/postgis:16-3.4
+    container_name: ta-postgis
+    environment:
+      POSTGRES_DB: ta
+      POSTGRES_USER: ${TA_PG_USER:-ta}
+      POSTGRES_PASSWORD: ${TA_PG_PASSWORD:-ta}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ta_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  ta_pgdata:

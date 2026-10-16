@@ -1,0 +1,144 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Actions pinadas por SHA de commit (review F0-N). Atualize o SHA junto da
+# tag comentada para evitar drift de supply-chain.
+#   actions/checkout@v6.1.0
+#   actions-rust-lang/setup-rust-toolchain@v1.17.0
+#   actions/cache@v6.1.0
+#   actions/upload-artifact@v4.6.1
+#   actions/download-artifact@v4.3.0
+
+jobs:
+  linux:
+    name: linux (fmt + clippy + test, sem PG)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Instala toolchain (usa rust-toolchain.toml, com rustfmt e clippy)
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+
+      - name: GDAL (libgdal-dev — link dinâmico da feature `gdal`)
+        run: sudo apt-get update && sudo apt-get install -y libgdal-dev
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test (sem TA_TEST_PG — suíte gated imprime "skipped")
+        run: cargo test --workspace
+
+      - name: cargo-deny (se disponível)
+        run: |
+          if ! command -v cargo-deny >/dev/null 2>&1; then
+            echo "cargo-deny ausente — instalando"
+            cargo install --locked cargo-deny
+          fi
+          cargo deny check licenses advisories bans sources
+
+  linux-pg:
+    name: "linux + postgres 16 / postgis 3.4 (testes gated: MVT, integração)"
+    runs-on: ubuntu-latest
+    env:
+      # Liga a suíte gated (pg_integration + mvt_integration).
+      TA_TEST_PG: "1"
+      # DSN consumido pelos testes (equivale ao DATABASE_URL do service).
+      TA_PG_DSN: postgres://ta:ta@localhost:5432/ta
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: ta
+          POSTGRES_PASSWORD: ta
+          POSTGRES_DB: ta
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ta -d ta"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Instala toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+
+      # ta-gis/ta-gui exigem libgdal para linkar mesmo sem usar GDAL nos
+      # testes gated — a imagem postgis não provê headers de GDAL.
+      - name: GDAL (libgdal-dev)
+        run: sudo apt-get update && sudo apt-get install -y libgdal-dev
+
+      # A imagem postgis/postgis:16-3.4 já traz protobuf-c (necessário p/
+      # ST_AsMVT) — o teste de MVT decodifica o tile real gerado pelo PG.
+      - name: Testes gated contra o service
+        run: cargo test --workspace
+
+  windows:
+    # AVISO HONESTO: este job não pôde ser executado no host de desenvolvimento
+    # (Linux). A primeira run de CI no push é a prova real. O caminho GDAL é
+    # vcpkg clássico — gdal-sys 0.12 procura `gdal_i.lib` em GDAL_LIB_DIR ou
+    # GDAL_HOME\lib e usa bindings pré-gerados por versão (GDAL_VERSION env;
+    # existem bindings p/ GDAL 3.4–3.12). Se a GDAL do vcpkg sair dessa faixa,
+    # ou se o link falhar, o fallback documentado é desligar as features
+    # raster (refatorar ta-gui p/ gdal opcional) e rodar só os testes não-GUI.
+    name: windows msvc (build + test, GDAL via vcpkg)
+    runs-on: windows-latest
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Instala toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+
+      - name: Cache binário do vcpkg (GDAL custa ~30 min de build a frio)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vcpkg-bincache
+          # Bump o sufixo vN p/ forçar GDAL mais nova.
+          key: vcpkg-gdal-x64-windows-v1
+          restore-keys: vcpkg-gdal-x64-windows-
+
+      - name: Instala GDAL (vcpkg clássico, triplet dinâmico)
+        run: vcpkg install gdal:x64-windows
+
+      - name: Exporta GDAL_LIB_DIR e GDAL_VERSION p/ gdal-sys
+        shell: pwsh
+        run: |
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
+          $libDir = Join-Path $vcpkgRoot "installed\x64-windows\lib"
+          $binDir = Join-Path $vcpkgRoot "installed\x64-windows\bin"
+          if (-not (Test-Path (Join-Path $libDir "gdal_i.lib"))) {
+            throw "gdal_i.lib não encontrado em $libDir"
+          }
+          # Versão real instalada pelo vcpkg (ex.: "3.11.4#1" -> "3.11.4").
+          $listing = (vcpkg list gdal) -join "`n"
+          $m = [regex]::Match($listing, "gdal\[core\]:x64-windows\s+([0-9]+\.[0-9]+\.[0-9]+)")
+          if (-not $m.Success) { throw "não consegui extrair a versão do GDAL de 'vcpkg list gdal'" }
+          $gdalVersion = $m.Groups[1].Value
+          Write-Host "GDAL_VERSION=$gdalVersion lib=$libDir bin=$binDir"
+          "GDAL_LIB_DIR=$libDir"       | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "GDAL_VERSION=$gdalVersion"  | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          # DLLs em runtime (gdal.dll, proj.dll, ...) para os testes.
+          Add-Content $env:GITHUB_PATH $binDir
+
+      - name: clippy (warnings não travam o job no Windows — ambiente novo)
+        run: cargo clippy --workspace --all-targets
+
+      - name: build
+        run: cargo build --workspace
+
+      - name: test
+        run: cargo test --workspace

@@ -1,0 +1,4 @@
+# Toolchain pinada pelo rustup — CI usa o mesmo arquivo.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

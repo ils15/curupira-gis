@@ -1,0 +1,29 @@
+[package]
+name = "ta-db"
+description = "Persistência do terraamazon-cleanroom-rust: pool sqlx (PG16/PostGIS 3.4), repos async e utilitários espaciais; GPKG offline opt-in."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ta-core.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+time.workspace = true
+serde_json.workspace = true
+# Macros query! ficam DESLIGADAS de propósito (risco R2: sem DATABASE_URL em
+# build) — só API runtime (sqlx::query / raw_sql / Migrator).
+sqlx = { workspace = true, features = ["time", "json", "migrate"] }
+
+rusqlite = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+geo-types.workspace = true
+
+[features]
+default = []
+# GPKG offline é OPT-IN (decisão Gate 1): o padrão do projeto é PG16/PostGIS.
+offline-gpkg = ["dep:rusqlite"]

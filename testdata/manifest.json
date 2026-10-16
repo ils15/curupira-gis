@@ -1,0 +1,37 @@
+{
+  "seed": 42,
+  "generator": "testdata/gen_fixtures.py",
+  "clean_room": "dados sint\u00e9ticos determin\u00edsticos \u2014 nada derivado do bundle legado",
+  "files": [
+    {
+      "arquivo": "fixtures_vector.shp",
+      "sha256": "0c0166c364c72cf5aac94be55d1d07331389fad78729340cf2ff8f6b504b5d88",
+      "bytes": 60324,
+      "rows_ou_dims": 200
+    },
+    {
+      "arquivo": "fixtures_vector.geojson",
+      "sha256": "54c92819c8f31f2bcce5413edb8c63f7888bee84623af40d9238394e09840992",
+      "bytes": 175419,
+      "rows_ou_dims": 200
+    },
+    {
+      "arquivo": "fixtures_vector.gpkg",
+      "sha256": "fdada6758632cdcb1f2869bb38028d2a795b87d07b1731bfae383b1670deb00b",
+      "bytes": 184320,
+      "rows_ou_dims": 200
+    },
+    {
+      "arquivo": "fixtures_points.csv",
+      "sha256": "2841cc2ea88ca6af0bdc3350c4d5e8a158af796d1a013c6775c631463410ffa7",
+      "bytes": 26104,
+      "rows_ou_dims": 500
+    },
+    {
+      "arquivo": "fixtures_raster.tif",
+      "sha256": "08dacb1fe1deeccefda2cf5b74d1f646b6f641f05aabc32a706b77d2eff0d251",
+      "bytes": 524813,
+      "rows_ou_dims": "256x256x4 UInt16"
+    }
+  ]
+}

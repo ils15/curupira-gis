@@ -1,0 +1,16 @@
+[package]
+name = "ta-core"
+description = "Domínio do terraamazon-cleanroom-rust: projeto, camada, feature, estilo, WKB/EWKB e erros."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+geo-types.workspace = true
+geozero = { workspace = true, features = ["with-wkb"] } # with-geo vem dos defaults
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true

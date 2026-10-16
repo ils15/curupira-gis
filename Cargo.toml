@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ta-core",
+    "crates/ta-gis",
+    "crates/ta-db",
+    "crates/ta-gui",
+    "crates/ta-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Curupira GIS contributors"]
+repository = "https://github.com/ils15/curupira-gis"
+homepage = "https://github.com/ils15/curupira-gis"
+
+[workspace.dependencies]
+# Domínio
+geo-types = { version = "0.7", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["serde-well-known"] }
+
+# IO geoespacial — opcionais atrás de features (ver crates/ta-gis)
+gdal = "0.19"
+geojson = "1.0"
+csv = "1.4"
+geozero = "0.15"
+# FlatGeobuf puro-Rust (usa geozero 0.15 — mesma versão do workspace, sem
+# duplicação no lock). default-features = false derruba http/reqwest.
+flatgeobuf = { version = "6.0", default-features = false }
+
+# Rede (WMS cache) — opt-in feature `wms` do ta-gis.
+# 0.12, não 0.13: a 0.13 troca o TLS default para rustls+aws-lc-rs (exige
+# cmake); a 0.12 `rustls-tls` usa ring e compila sem deps extras de build.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
+sha2 = "0.10"
+# Percent-encoding dos valores do GetMap (layers/crs/format) — mesma 2.3 do lock.
+percent-encoding = "2.3"
+
+# Persistência
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
+# 0.39 (não 0.40): rusqlite 0.40 exige libsqlite3-sys ^0.38, que conflita com
+# sqlx-sqlite 0.9 (<0.38) no resolver quando o grafo é re-resolvido. 0.39
+# unifica em libsqlite3-sys 0.37.x. Revisar quando sqlx subir.
+rusqlite = { version = "0.39", features = ["bundled"] }
+async-trait = "0.1"
+
+# GUI / CLI
+eframe = "0.37"
+clap = { version = "4.6", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# Interno
+ta-core = { path = "crates/ta-core" }
+ta-db = { path = "crates/ta-db" }
+ta-gis = { path = "crates/ta-gis" }

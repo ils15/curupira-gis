@@ -1,0 +1,52 @@
+# cargo-deny — política de licenças, advisories, bans e fontes.
+# Docs: https://embarkstudios.github.io/cargo-deny/
+# Rodar localmente: `cargo deny check`
+#
+# Política de licença: apenas permissivas. Copyleft (GPL/AGPL/LGPL/MPL) NÃO
+# está na allow-list — com a lista abaixo, `cargo deny check licenses` falha
+# ao detectar qualquer licença copyleft (gate duro de release).
+
+[graph]
+all-features = false
+no-default-features = false
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "BSL-1.0",
+    # fonts embutidas do egui (epaint_default_fonts)
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+
+[advisories]
+version = 2
+yanked = "warn"
+ignore = [
+    # ttf-parser (transitivo de egui/default_fonts) marcado unmaintained —
+    # sem vuln ativa; revisar quando egui migrar de fonte de glyphs.
+    { id = "RUSTSEC-2026-0192", reason = "unmaintained, transitivo via egui 0.37 default_fonts" },
+]
+
+[bans]
+multiple-versions = "warn"
+# "deny" conflita com herança de workspace (ta-core.workspace = true vira `*`
+# interno); "warn" mantém o sinal sem falhar deps internas do workspace.
+wildcards = "warn"
+highlight = "all"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
