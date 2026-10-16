@@ -95,16 +95,53 @@ jobs:
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
           if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
           $libDir = Join-Path $vcpkgRoot "installed\x64-windows\lib"
-          if (-not (Test-Path (Join-Path $libDir "gdal_i.lib"))) {
-            throw "gdal_i.lib não encontrado em $libDir"
+          $binDir = Join-Path $vcpkgRoot "installed\x64-windows\bin"
+          if (-not (Test-Path $libDir)) {
+            throw "diretório de libs do vcpkg não existe: $libDir — o passo 'vcpkg install gdal:x64-windows' concluiu?"
           }
-          # Regex relaxada (ver comentário no ci.yml): compatível com os
-          # formatos antigo e novo de `vcpkg list`; erro imprime o listing.
+
+          # Mesma correção do ci.yml (root cause da run #3): o vcpkg gera o
+          # import library como `gdal.lib`, mas o build.rs do gdal-sys 0.12
+          # no MSVC procura `gdal_i.lib`. Normalizamos copiando. Idempotente.
+          $gdalImport = Join-Path $libDir "gdal_i.lib"
+          if (Test-Path $gdalImport) {
+            Write-Host "gdal_i.lib já presente em $libDir (idempotente, nada a fazer)"
+          } else {
+            $candidates = @(Get-ChildItem -Path $libDir -Filter "gdal*.lib")
+            $src = $candidates | Where-Object { $_.Name -ieq "gdal.lib" } | Select-Object -First 1
+            if (-not $src) { $src = $candidates | Select-Object -First 1 }
+            if (-not $src) {
+              $allLibs = @(Get-ChildItem -Path $libDir -Filter "*.lib" |
+                Select-Object -ExpandProperty Name) -join ", "
+              if (-not $allLibs) { $allLibs = "<vazio>" }
+              throw "nenhum gdal*.lib em $libDir p/ normalizar em gdal_i.lib — *.lib presentes: [$allLibs]. Verifique o triplet (x64-windows dinâmico) e se o port gdal concluiu a instalação."
+            }
+            Copy-Item $src.FullName $gdalImport
+            Write-Host "Import library normalizada: $($src.Name) -> gdal_i.lib (vcpkg não usa o naming gdal_i do SDK oficial)"
+          }
+
+          # Regex relaxada + fallback (ver comentário detalhado no ci.yml):
+          # compatível com os formatos antigo e novo de `vcpkg list`; erro
+          # imprime o listing.
           $listing = (vcpkg list gdal) -join "`n"
+          $gdalVersion = $null
           $m = [regex]::Match($listing, "gdal(\[[^\]]*\])?:x64-windows\s+([0-9]+\.[0-9]+\.[0-9]+)")
-          if (-not $m.Success) { throw "não consegui extrair a versão do GDAL de 'vcpkg list gdal':`n$listing" }
+          if ($m.Success) { $gdalVersion = $m.Groups[2].Value }
+          if (-not $gdalVersion) {
+            $linha = ($listing -split "`n" | Where-Object { $_ -match "^\s*gdal" } | Select-Object -First 1)
+            if ($linha) {
+              $m2 = [regex]::Match($linha, "([0-9]+\.[0-9]+\.[0-9]+)")
+              if ($m2.Success) { $gdalVersion = $m2.Groups[1].Value }
+            }
+          }
+          if (-not $gdalVersion) { throw "não consegui extrair a versão do GDAL de 'vcpkg list gdal':`n$listing" }
+
           "GDAL_LIB_DIR=$libDir"      | Out-File -Append $env:GITHUB_ENV -Encoding utf8
-          "GDAL_VERSION=$($m.Groups[2].Value)" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "GDAL_VERSION=$gdalVersion" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          # DLLs de runtime no PATH (simetria com ci.yml): o release não roda
+          # testes, mas garante que qualquer binário executado por build
+          # scripts não morra com 0xc0000135 STATUS_DLL_NOT_FOUND.
+          Add-Content $env:GITHUB_PATH $binDir
 
       - name: Build release
         run: cargo build --release --workspace

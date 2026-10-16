@@ -369,6 +369,50 @@ real (via service) **nunca chegou a rodar** nas runs #1–2. Com o decoder
 corrigido ele executará no CI pela primeira vez — verde localmente contra
 PG real (harness), mas é a parte não comprovada em CI até a próxima run.
 
+### Run #3 — CI no push (2026-10-16)
+
+| Job | Resultado |
+|-----|-----------|
+| `linux` (fmt + clippy + test, sem PG) | ✅ verde |
+| `linux-pg` (Postgres 16 / PostGIS 3.4, `TA_TEST_PG=1`) | ✅ verde — **MVT real passou**: tile decodificado do `ST_AsMVT` do PG |
+| `windows` (msvc, GDAL via vcpkg) | ❌ falhou no step "Exporta GDAL_LIB_DIR e GDAL_VERSION p/ gdal-sys" |
+
+#### Falha do windows (run #3)
+
+`gdal_i.lib não encontrado em C:\vcpkg\installed\x64-windows\lib` — o vcpkg
+instalou GDAL 3.12.4 com sucesso (~1.5h de build, **binary cache gravado**;
+próxima run restaura e é rápida), mas gera o import library como `gdal.lib`,
+enquanto o `build.rs` do gdal-sys 0.12 no MSVC procura `gdal_i.lib` (naming do
+SDK oficial antigo). Sem `gdal_i.lib` em `GDAL_LIB_DIR` ou `GDAL_HOME\lib`, o
+build script morre com "windows-msvc requires gdal_i.lib".
+
+#### Correção (aplicada em ci.yml + release.yml, mesmo step)
+
+1. **Normalização do import library**: se `gdal_i.lib` não existe, o step
+   procura `gdal*.lib` (preferindo o `gdal.lib` canônico do vcpkg) e faz
+   `Copy-Item gdal.lib gdal_i.lib` no mesmo dir. Se nada existe, o erro lista
+   os `*.lib` presentes (diagnóstico futuro). Idempotente: se `gdal_i.lib`
+   já existe, não faz nada.
+2. **`GDAL_VERSION` endurecida**: regex principal + fallback (1ª linha
+   iniciada por `gdal` → primeiro `X.Y.Z`) p/ tolerar drift de formato do
+   `vcpkg list`. Bindings pré-gerados do gdal-sys 0.12 cobrem GDAL 3.4–3.12
+   (`3_12` confirmado no crate) — 3.12.4 usa os bindings `3_12`.
+3. **DLLs em runtime**: `installed\x64-windows\bin` no `GITHUB_PATH`. Já
+   existia no ci.yml; adicionado ao release.yml por simetria. Sem isso o
+   build liga (import library) mas o primeiro binário executado morre com
+   `0xc0000135` (`STATUS_DLL_NOT_FOUND`).
+4. Linux jobs intocados.
+
+#### O que a run #4 vai provar (verificação que não dá p/ fazer no host Linux)
+
+1. `vcpkg install` restaura do binary cache (minutos, não 1.5h) e o step
+   "Exporta" loga `Import library normalizada: gdal.lib -> gdal_i.lib`.
+2. `GDAL_VERSION=3.12.4` extraído e exportado (bindings `3_12` selecionados).
+3. `cargo clippy`/`build`/`test` do windows verdes — valida (a) o link MSVC
+   contra a import library renomeada (`static=gdal_i` → import de `gdal.dll`)
+   e (b) o load da `gdal.dll` + dependências transitivas via PATH no primeiro
+   binário executado (`cargo test`).
+
 ### Pendências pós-push (Fase 4)
 
 1. Acompanhar run de CI — **principalmente job `windows`** (vcpkg/gdal-sys: primeira prova real; `actionlint` não existia no host, validação foi manual).

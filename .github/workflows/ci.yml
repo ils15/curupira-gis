@@ -129,22 +129,61 @@ jobs:
           if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
           $libDir = Join-Path $vcpkgRoot "installed\x64-windows\lib"
           $binDir = Join-Path $vcpkgRoot "installed\x64-windows\bin"
-          if (-not (Test-Path (Join-Path $libDir "gdal_i.lib"))) {
-            throw "gdal_i.lib não encontrado em $libDir"
+          if (-not (Test-Path $libDir)) {
+            throw "diretório de libs do vcpkg não existe: $libDir — o passo 'vcpkg install gdal:x64-windows' concluiu?"
           }
-          # Versão real instalada pelo vcpkg (ex.: "3.11.4#1" -> "3.11.4").
-          # Regex relaxada: o formato de `vcpkg list` mudou entre versões
-          # (`gdal[core]:triplet` vs `gdal[features] triplet`); pegamos a
-          # 1ª linha de pacote gdal e dela o primeiro X.Y.Z. Bindings
-          # pré-gerados do gdal-sys 0.12 cobrem GDAL 3.4–3.12.
+
+          # Root cause da run #3 (fix validado na run #4): o vcpkg gera o
+          # import library como `gdal.lib`; o build.rs do gdal-sys 0.12 no
+          # MSVC procura `gdal_i.lib` (naming do SDK oficial antigo) e, sem
+          # ele, morre com "windows-msvc requires gdal_i.lib". Normalizamos
+          # copiando gdal.lib -> gdal_i.lib no mesmo dir. A import library
+          # é ligada como static=gdal_i — o binário segue dependendo de
+          # gdal.dll em runtime (PATH do binDir no fim deste step).
+          $gdalImport = Join-Path $libDir "gdal_i.lib"
+          if (Test-Path $gdalImport) {
+            Write-Host "gdal_i.lib já presente em $libDir (idempotente, nada a fazer)"
+          } else {
+            # Genérico: aceita qualquer gdal*.lib, preferindo o `gdal.lib`
+            # canônico do vcpkg (o nome usado no link sempre será gdal_i).
+            $candidates = @(Get-ChildItem -Path $libDir -Filter "gdal*.lib")
+            $src = $candidates | Where-Object { $_.Name -ieq "gdal.lib" } | Select-Object -First 1
+            if (-not $src) { $src = $candidates | Select-Object -First 1 }
+            if (-not $src) {
+              $allLibs = @(Get-ChildItem -Path $libDir -Filter "*.lib" |
+                Select-Object -ExpandProperty Name) -join ", "
+              if (-not $allLibs) { $allLibs = "<vazio>" }
+              throw "nenhum gdal*.lib em $libDir p/ normalizar em gdal_i.lib — *.lib presentes: [$allLibs]. Verifique o triplet (x64-windows dinâmico) e se o port gdal concluiu a instalação."
+            }
+            Copy-Item $src.FullName $gdalImport
+            Write-Host "Import library normalizada: $($src.Name) -> gdal_i.lib (vcpkg não usa o naming gdal_i do SDK oficial)"
+          }
+
+          # Versão real instalada pelo vcpkg (ex.: "3.12.4#1" -> "3.12.4").
+          # O formato de `vcpkg list` variou entre versões do vcpkg; o 1º
+          # regex cobre os formatos conhecidos (`gdal[features]:triplet` e
+          # `gdal:triplet`); o fallback pega a 1ª linha iniciada por `gdal`
+          # e dela o primeiro X.Y.Z. Bindings pré-gerados do gdal-sys 0.12
+          # cobrem GDAL 3.4–3.12 (3_12 confirmado no crate local).
           $listing = (vcpkg list gdal) -join "`n"
+          $gdalVersion = $null
           $m = [regex]::Match($listing, "gdal(\[[^\]]*\])?:x64-windows\s+([0-9]+\.[0-9]+\.[0-9]+)")
-          if (-not $m.Success) { throw "não consegui extrair a versão do GDAL de 'vcpkg list gdal':`n$listing" }
-          $gdalVersion = $m.Groups[2].Value
+          if ($m.Success) { $gdalVersion = $m.Groups[2].Value }
+          if (-not $gdalVersion) {
+            $linha = ($listing -split "`n" | Where-Object { $_ -match "^\s*gdal" } | Select-Object -First 1)
+            if ($linha) {
+              $m2 = [regex]::Match($linha, "([0-9]+\.[0-9]+\.[0-9]+)")
+              if ($m2.Success) { $gdalVersion = $m2.Groups[1].Value }
+            }
+          }
+          if (-not $gdalVersion) { throw "não consegui extrair a versão do GDAL de 'vcpkg list gdal':`n$listing" }
+
           Write-Host "GDAL_VERSION=$gdalVersion lib=$libDir bin=$binDir"
           "GDAL_LIB_DIR=$libDir"       | Out-File -Append $env:GITHUB_ENV -Encoding utf8
           "GDAL_VERSION=$gdalVersion"  | Out-File -Append $env:GITHUB_ENV -Encoding utf8
-          # DLLs em runtime (gdal.dll, proj.dll, ...) para os testes.
+          # DLLs de runtime (gdal.dll + proj/geos/sqlite/...) p/ os steps
+          # seguintes: sem PATH, o build liga mas o primeiro binário
+          # executado (cargo test) morre com 0xc0000135 STATUS_DLL_NOT_FOUND.
           Add-Content $env:GITHUB_PATH $binDir
 
       - name: clippy (warnings não travam o job no Windows — ambiente novo)
