@@ -222,11 +222,16 @@ async fn mvt_tile_tem_estrutura_valida_e_versao_2() {
         .expect("bulk_insert");
     assert_eq!(inserted, 50);
 
-    // Tile que contém o bbox do lote (z5 cobre lon -180..-45? não exato,
-    // mas o teste pede o tile por coordenada e valida a estrutura).
+    // Tile (3, 2, 4) = lon -90..-45, lat -22.5..0 — contém o lote inteiro
+    // (lon -52..-51, lat -12..-11) SEM clipping. ST_TileEnvelope com bounds
+    // geográficos divide o envelope LINEARMENTE (lat = 90 - y·180/2^z; sem
+    // projeção de Mercator no eixo y). O tile original (6, 25, 38) caía no
+    // Atlântico (lon -39.4..-33.8) → tile vazio → Ok(None) → panic — causa
+    // raiz do vermelho do job linux-pg na 1ª run de CI (o teste nunca havia
+    // rodado: o harness conda não tem protobuf-c e pulava os tiles reais).
     let tile = MvtTile {
         layer_name: "lote_teste".into(),
-        ..MvtTile::new(6, 25, 38)
+        ..MvtTile::new(3, 2, 4)
     };
     let bytes = mvt_tile(&pool, &layer.id, &tile)
         .await
@@ -291,8 +296,17 @@ async fn mvt_zoom_alto_simplifica_mais_que_zoom_baixo() {
         .await
         .expect("bulk_insert");
 
-    let z_baixo = MvtTile::new(5, 25, 38);
-    let z_alto = MvtTile::new(16, z_x(5, 25), z_y(5, 38));
+    // (5, 11, 18) = lon -56.25..-45, lat -16.875..-11.25 — contém o
+    // polígono inteiro (lon -52..-51, lat -12.05..-12.0) sem clipping. O
+    // tile original (5, 25, 38) estourava o Y do mundo (y máx = 2^5-1 = 31)
+    // → `ST_TileEnvelope: Invalid tile y value, 38` → panic no expect — a
+    // outra causa raiz do job linux-pg na 1ª run.
+    let z_baixo = MvtTile::new(5, 11, 18);
+    // Tile z16 SOB o polígono (lon -51.998..-51.993, lat -12.038..-12.036 —
+    // interior do anel, longe das bordas): 2048× menor que o z5, o clip
+    // ST_AsMVTGeom reduz a ~1 quadrado (~5 comandos) enquanto o z5 carrega
+    // os ~100 vértices da serra (tolerância z5 ≈ 0.0027° < dente 0.01°).
+    let z_alto = MvtTile::new(16, 23302, 37150);
     let tile_baixo = mvt_tile(&pool, &layer.id, &z_baixo)
         .await
         .expect("tile z5")
@@ -310,17 +324,6 @@ async fn mvt_zoom_alto_simplifica_mais_que_zoom_baixo() {
         );
     } // None = tile menor que a feição: vazio é válido
     pool.close().await;
-}
-
-/// Coluna x equivalente ao dobro de zoom (mesma região do globo).
-fn z_x(z: i32, x: i32) -> i32 {
-    x * (1 << (16 - z))
-}
-
-/// Linha y equivalente ao dobro de zoom (4× por nível, ordem invertida é
-/// irrelevante para a checagem de tamanho).
-fn z_y(z: i32, y: i32) -> i32 {
-    y * (1 << (16 - z))
 }
 
 #[tokio::test]
