@@ -4,7 +4,7 @@
 - **Criado:** 2026-10-16
 - **Gate 1:** **APROVADO** pelo usuário (2026-10-16)
 - **Modelo IA:** GLM-5.3-Flash (z.ai) para todos os agentes
-- **Repositório:** `/home/jovyan/testes/terraamazon-cleanroom-rust` (greenfield; `git init` feito, **nenhum commit** — commits/push serão aprovados separadamente)
+- **Repositório:** `/home/jovyan/testes/terraamazon-cleanroom-rust` → publicado em https://github.com/ils15/curupira-gis (commit `3b3eaa8`, tag `v0.1.0-alpha`, 2026-10-16)
 
 ## Decisões (Gate 1, 2026-10-16)
 
@@ -29,7 +29,7 @@
 | 1 | Persistência PostGIS + migrações + `ta-cli migrate` | **completa** (2026-10-16) |
 | 2 | IO geoespacial MVP + derivados (COG/MVT/FlatGeobuf) | **completa** (2026-10-16; ver seção Fase 2) |
 | 3 | GUI egui+eframe sobre MapView + bench + security review | **completa** (2026-10-16; ver seção Fase 3) |
-| 4 | Packaging + release (rebrand Curupira GIS, CI, release draft) | **em progresso** (2026-10-16; ver seção Fase 4) |
+| 4 | Packaging + release (rebrand Curupira GIS, CI, release draft) | **pushed** (2026-10-16; commit `3b3eaa8` + tag `v0.1.0-alpha`; 1ª run de CI vermelha — causas raiz diagnosticadas e **correções locais aguardando commit** — ver seção Fase 4) |
 
 ## Verificação da Fase 0 (executada em 2026-10-16, host Linux)
 
@@ -273,10 +273,57 @@ com display (listado em `benches/map_render.md`).
 | `actionlint` | ⚠️ **ausente no host** — validação limitada a sintaxe YAML/semântica GHA manual; rodar actionlint no primeiro push |
 | **Build Windows** | ❌ **NÃO PROVÁVEL neste host (Linux)** — o job `windows` é construído sobre o contrato verificado do gdal-sys; a **primeira run de CI no push é a prova real** |
 
-### Falta para fechar a Fase 4
+### Push executado (@iris, 2026-10-16 — aprovado explicitamente pelo usuário)
 
-1. @iris: commit + push p/ `github.com/ils15/curupira-gis` (branch `main`).
-2. Primeira run de CI: conferir job `linux-pg` (MVT) e, principalmente, `windows` (vcpkg/gdal-sys).
-3. Rodar `actionlint` (host com a ferramenta) sobre os dois workflows.
-4. Tag `v0.1.0` (== versão do workspace) → release.yml gera o draft; revisão humana publica.
+| Item | Resultado |
+|---|---|
+| Auth | ✅ token `~/.git-credentials` (helper `store`), scopes `repo, workflow`; `gh` CLI ausente — API REST usada |
+| Commit | ✅ `3b3eaa8` (root-commit, branch `main`): 93 arquivos, 22.196 linhas, **1,65 MB** (sem `target/` 18G, sem `testdata/bench/*` grandes, sem legado — `.gitignore` barrou) |
+| Push | ✅ `main` → `origin` (`https://github.com/ils15/curupira-gis`), verificado via `git ls-remote` |
+| Tag | ✅ `v0.1.0-alpha` (anotada) pushed — dispara `release.yml` (trigger `v*`) → **release DRAFT** |
+| Run CI | ✅ disparada (push `main`), `in_progress`: jobs `linux`, `linux-pg` (PostGIS 3.4/MVT), `windows` (vcpkg/gdal-sys) → https://github.com/ils15/curupira-gis/actions/runs/38944639843 |
+| Run release | ✅ disparada (push tag), `in_progress` → https://github.com/ils15/curupira-gis/actions/runs/38944663060 |
+| Draft release | ⏳ NÃO publicado — gate humano (revisar artefatos/checksums/SBOM antes de publish) |
+
+### 1ª run de CI — falhas, diagnóstico e correções (@prometheus, 2026-10-16)
+
+Resultado da 1ª run (push `3b3eaa8` + tag `v0.1.0-alpha`): `linux-pg` ❌ (~2min, exit 101 no
+step de testes), `windows msvc` ❌ (~1,5min, step `vcpkg install`), `release windows` ❌ (~1min,
+mesmo step). `linux` e `release linux` seguiam em progresso (ignorados). Logs de job não
+baixáveis sem admin (API 403) — diagnóstico por: **(a)** steps/conclusões via API pública de
+jobs, **(b)** reprodução local integral da suíte gated com o harness PG (conda) e **(c)** prova
+numérica dos envelopes `ST_TileEnvelope` no PostGIS 16/3.4 local.
+
+**linux-pg — causa raiz: bugs de coordenada de tile nos testes MVT** (`mvt_integration.rs`).
+Os 3 testes que exigem `ST_AsMVT` real **nunca haviam rodado em host algum** (o harness conda
+não tem protobuf-c → `[skip]`; a imagem docker do CI tem → rodaram pela 1ª vez e falharam):
+
+| Teste | Coordenada antiga | Falha provada (PostGIS local) | Correção |
+|---|---|---|---|
+| `mvt_tile_tem_estrutura_valida_e_versao_2` | `(6,25,38)` | envelope = lon −39.4..−33.8 (Atlântico) → tile vazio → `Ok(None)` → panic no `.expect` | `(3,2,4)` — lon −90..−45, lat −22.5..0, **contém o lote sem clipping** |
+| `mvt_zoom_alto_simplifica_mais_que_zoom_baixo` | `(5,25,38)` | `ST_TileEnvelope: Invalid tile y value, 38` (y máx = 2⁵−1 = 31) → erro de DB → panic | z5 `(5,11,18)` (contém o polígono inteiro) + z16 `(23302,37150)` (tile SOB o polígono, interior do anel) |
+| `mvt_area_vazia_e_none` | `(6,62,25)` | ✅ correta (Pacífico vazio) — passou no CI | inalterado |
+
+Envelopes novos **provados via SQL** no PostGIS 16/3.4 local (`ST_TileEnvelope` com bounds
+geográficos divide LINEARMENTE: lat = 90 − y·180/2^z, sem Mercator no eixo y). Helpers `z_x`/`z_y`
+removidos (ficariam `dead_code` → clippy `-D warnings` quebraria o job linux). DSN/env
+`TA_PG_DSN`/`TA_TEST_PG` conferidos: batem com os testes — NÃO era a causa.
+
+**windows (ci) e release windows — causa raiz: diretório do binary cache do vcpkg inexistente.**
+`VCPKG_DEFAULT_BINARY_CACHE` aponta para `vcpkg-bincache` sob o workspace, **nunca criado**:
+na 1ª run não há cache a restaurar e o `actions/cache` não cria o path; o vcpkg exige o
+diretório já existente (grava dentro, não cria) → `vcpkg install gdal:x64-windows` morria no
+startup em 14–21s, antes de compilar qualquer pacote. Correção (idempotente, nos 2 workflows):
+`New-Item -ItemType Directory -Force` antes do install, com `shell: pwsh` explícito. Endurecido
+também o regex de extração de `GDAL_VERSION` (formatos antigo/novo de `vcpkg list`; grupo 2;
+erro imprime o listing — seria a próxima falha silenciosa). `GDAL_LIB_DIR` + `GDAL_VERSION`
+mantidos (contrato do `gdal-sys` 0.12 verificado na decisão 2 da Fase 4).
+
+### Pendências pós-push (Fase 4)
+
+1. Acompanhar run de CI — **principalmente job `windows`** (vcpkg/gdal-sys: primeira prova real; `actionlint` não existia no host, validação foi manual).
+2. Conferir job `linux-pg` (testes MVT/integração contra PostGIS 3.4).
+3. Revisar o **draft release** gerado pela run `release` (artefatos linux/windows, `SHA256SUMS`, SBOM CycloneDX) e publicar manualmente após aprovação.
+4. Este STATUS.md foi atualizado **localmente após o push** — a versão publicada no repo está desatualizada; publicá-la exige um segundo commit (aguardando instrução).
+5. **Commitar e pushar as correções da 1ª run** (3 arquivos: `ci.yml`, `release.yml`, `mvt_integration.rs` + este STATUS.md) — @iris. A 2ª run de CI é a prova das correções; se o job windows avançar do `vcpkg install`, monitorar o **link** do gdal-sys e a extração de `GDAL_VERSION` (regex endurecida p/ ambos os formatos de `vcpkg list`).
 

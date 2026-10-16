@@ -110,8 +110,17 @@ jobs:
           key: vcpkg-gdal-x64-windows-v1
           restore-keys: vcpkg-gdal-x64-windows-
 
+      # Root cause da 1ª run (falhou em ~20s, antes de compilar qualquer
+      # coisa): VCPKG_DEFAULT_BINARY_CACHE aponta para um diretório que
+      # NÃO existia — na 1ª run não há cache a restaurar e o actions/cache
+      # não cria o path. O vcpkg exige que o diretório do binary cache já
+      # exista (ele grava arquivos dentro, mas não cria o diretório), então
+      # o `vcpkg install` morria no startup. O mkdir é idempotente.
       - name: Instala GDAL (vcpkg clássico, triplet dinâmico)
-        run: vcpkg install gdal:x64-windows
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          vcpkg install gdal:x64-windows
 
       - name: Exporta GDAL_LIB_DIR e GDAL_VERSION p/ gdal-sys
         shell: pwsh
@@ -124,10 +133,14 @@ jobs:
             throw "gdal_i.lib não encontrado em $libDir"
           }
           # Versão real instalada pelo vcpkg (ex.: "3.11.4#1" -> "3.11.4").
+          # Regex relaxada: o formato de `vcpkg list` mudou entre versões
+          # (`gdal[core]:triplet` vs `gdal[features] triplet`); pegamos a
+          # 1ª linha de pacote gdal e dela o primeiro X.Y.Z. Bindings
+          # pré-gerados do gdal-sys 0.12 cobrem GDAL 3.4–3.12.
           $listing = (vcpkg list gdal) -join "`n"
-          $m = [regex]::Match($listing, "gdal\[core\]:x64-windows\s+([0-9]+\.[0-9]+\.[0-9]+)")
-          if (-not $m.Success) { throw "não consegui extrair a versão do GDAL de 'vcpkg list gdal'" }
-          $gdalVersion = $m.Groups[1].Value
+          $m = [regex]::Match($listing, "gdal(\[[^\]]*\])?:x64-windows\s+([0-9]+\.[0-9]+\.[0-9]+)")
+          if (-not $m.Success) { throw "não consegui extrair a versão do GDAL de 'vcpkg list gdal':`n$listing" }
+          $gdalVersion = $m.Groups[2].Value
           Write-Host "GDAL_VERSION=$gdalVersion lib=$libDir bin=$binDir"
           "GDAL_LIB_DIR=$libDir"       | Out-File -Append $env:GITHUB_ENV -Encoding utf8
           "GDAL_VERSION=$gdalVersion"  | Out-File -Append $env:GITHUB_ENV -Encoding utf8

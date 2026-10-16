@@ -81,8 +81,13 @@ jobs:
           key: vcpkg-gdal-x64-windows-v1
           restore-keys: vcpkg-gdal-x64-windows-
 
+      # Mesma correção do ci.yml: o diretório do binary cache precisa
+      # existir antes do vcpkg (1ª run falhou aqui em ~14s sem o mkdir).
       - name: Instala GDAL (vcpkg clássico)
-        run: vcpkg install gdal:x64-windows
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          vcpkg install gdal:x64-windows
 
       - name: Exporta GDAL_LIB_DIR e GDAL_VERSION p/ gdal-sys
         shell: pwsh
@@ -93,11 +98,13 @@ jobs:
           if (-not (Test-Path (Join-Path $libDir "gdal_i.lib"))) {
             throw "gdal_i.lib não encontrado em $libDir"
           }
+          # Regex relaxada (ver comentário no ci.yml): compatível com os
+          # formatos antigo e novo de `vcpkg list`; erro imprime o listing.
           $listing = (vcpkg list gdal) -join "`n"
-          $m = [regex]::Match($listing, "gdal\[core\]:x64-windows\s+([0-9]+\.[0-9]+\.[0-9]+)")
-          if (-not $m.Success) { throw "não consegui extrair a versão do GDAL de 'vcpkg list gdal'" }
+          $m = [regex]::Match($listing, "gdal(\[[^\]]*\])?:x64-windows\s+([0-9]+\.[0-9]+\.[0-9]+)")
+          if (-not $m.Success) { throw "não consegui extrair a versão do GDAL de 'vcpkg list gdal':`n$listing" }
           "GDAL_LIB_DIR=$libDir"      | Out-File -Append $env:GITHUB_ENV -Encoding utf8
-          "GDAL_VERSION=$($m.Groups[1].Value)" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "GDAL_VERSION=$($m.Groups[2].Value)" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
 
       - name: Build release
         run: cargo build --release --workspace
