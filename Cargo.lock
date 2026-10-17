@@ -4705,6 +4705,7 @@ dependencies = [
  "gdal",
  "geo-types",
  "percent-encoding",
+ "serde",
  "serde_json",
  "sqlx",
  "ta-core",

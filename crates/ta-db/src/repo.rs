@@ -31,6 +31,9 @@ pub trait ProjectRepo: Send + Sync {
     async fn list(&self) -> Result<Vec<Project>>;
     /// Remove o projeto (e camadas/features por CASCADE). `Ok(false)` = ausente.
     async fn delete(&self, id: &str) -> Result<bool>;
+    /// Renomeia o projeto. `Ok(false)` = ausente (nome duplicado vira erro
+    /// do UNIQUE — normalizado em `Error::Sql`).
+    async fn rename(&self, id: &str, new_name: &str) -> Result<bool>;
 }
 
 /// Repositório de camadas.
@@ -56,6 +59,9 @@ pub trait LayerRepo: Send + Sync {
         max_y: f64,
     ) -> Result<bool>;
     async fn delete(&self, id: &str) -> Result<bool>;
+    /// Renomeia a camada. `Ok(false)` = ausente (conflito com o UNIQUE
+    /// `(project_id, name)` vira `Error::Sql`).
+    async fn rename(&self, id: &str, new_name: &str) -> Result<bool>;
 }
 
 /// Repositório de features (geometrias + atributos).
@@ -164,6 +170,16 @@ impl ProjectRepo for PgProjectRepo {
             .await?;
         Ok(res.rows_affected() > 0)
     }
+
+    async fn rename(&self, id: &str, new_name: &str) -> Result<bool> {
+        check_id(id)?;
+        let res = sqlx::query("UPDATE projects SET name = $2 WHERE id = $1::uuid")
+            .bind(id)
+            .bind(new_name)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
 }
 
 /// Repositório de camadas sobre [`PgPool`].
@@ -175,6 +191,62 @@ pub struct PgLayerRepo {
 impl PgLayerRepo {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// `add` sobre o **executor** dado (pool ou transação) — mesmo SQL do
+    /// trait, exposto para `ops.rs` compor camada derivada + features + bbox
+    /// em UMA transação (erro SQL nunca deixa camada derivada órfã).
+    pub async fn add_on<'e, E>(exec: E, layer: &Layer) -> Result<Layer>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        check_id(&layer.project_id)?;
+        if layer.srid != TARGET_SRID {
+            return Err(ta_core::Error::SridMismatch {
+                expected: TARGET_SRID,
+                got: layer.srid,
+            }
+            .into());
+        }
+        let gt = geom_type_to_text(layer.geom_type)
+            .ok_or(Error::UnsupportedGeomType(layer.geom_type))?;
+        let row: LayerRow = sqlx::query_as(
+            "INSERT INTO layers (id, project_id, name, geom_type, srid, source_uri) \
+             VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2::uuid, $3, $4, $5, $6) \
+             RETURNING id::text, project_id::text, name, geom_type, srid, source_uri",
+        )
+        .bind(&layer.id)
+        .bind(&layer.project_id)
+        .bind(&layer.name)
+        .bind(gt)
+        .bind(layer.srid as i32)
+        .bind(&layer.source_uri)
+        .fetch_one(exec)
+        .await?;
+        layer_from_row(row)
+    }
+
+    /// `update_bbox` sobre o **executor** dado (pool ou transação).
+    pub async fn update_bbox_on<'e, E>(exec: E, layer_id: &str) -> Result<bool>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        check_id(layer_id)?;
+        // 4674 é constante do schema (CHECK features_srid_4674), não dado do
+        // usuário — literal em SQL estático, sem formatação.
+        let res = sqlx::query(
+            "WITH ext AS ( \
+                 SELECT ST_SetSRID(ST_Extent(geom)::geometry, 4674) AS b \
+                 FROM features WHERE layer_id = $1::uuid \
+             ) \
+             UPDATE layers SET bbox = ext.b \
+             FROM ext \
+             WHERE layers.id = $1::uuid AND ext.b IS NOT NULL",
+        )
+        .bind(layer_id)
+        .execute(exec)
+        .await?;
+        Ok(res.rows_affected() > 0)
     }
 }
 
@@ -231,30 +303,7 @@ fn layer_from_row(row: LayerRow) -> Result<Layer> {
 #[async_trait]
 impl LayerRepo for PgLayerRepo {
     async fn add(&self, layer: &Layer) -> Result<Layer> {
-        check_id(&layer.project_id)?;
-        if layer.srid != TARGET_SRID {
-            return Err(ta_core::Error::SridMismatch {
-                expected: TARGET_SRID,
-                got: layer.srid,
-            }
-            .into());
-        }
-        let gt = geom_type_to_text(layer.geom_type)
-            .ok_or(Error::UnsupportedGeomType(layer.geom_type))?;
-        let row: LayerRow = sqlx::query_as(
-            "INSERT INTO layers (id, project_id, name, geom_type, srid, source_uri) \
-             VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2::uuid, $3, $4, $5, $6) \
-             RETURNING id::text, project_id::text, name, geom_type, srid, source_uri",
-        )
-        .bind(&layer.id)
-        .bind(&layer.project_id)
-        .bind(&layer.name)
-        .bind(gt)
-        .bind(layer.srid as i32)
-        .bind(&layer.source_uri)
-        .fetch_one(&self.pool)
-        .await?;
-        layer_from_row(row)
+        Self::add_on(&self.pool, layer).await
     }
 
     async fn get(&self, id: &str) -> Result<Option<Layer>> {
@@ -282,22 +331,7 @@ impl LayerRepo for PgLayerRepo {
     }
 
     async fn update_bbox(&self, layer_id: &str) -> Result<bool> {
-        check_id(layer_id)?;
-        // 4674 é constante do schema (CHECK features_srid_4674), não dado do
-        // usuário — literal em SQL estático, sem formatação.
-        let res = sqlx::query(
-            "WITH ext AS ( \
-                 SELECT ST_SetSRID(ST_Extent(geom)::geometry, 4674) AS b \
-                 FROM features WHERE layer_id = $1::uuid \
-             ) \
-             UPDATE layers SET bbox = ext.b \
-             FROM ext \
-             WHERE layers.id = $1::uuid AND ext.b IS NOT NULL",
-        )
-        .bind(layer_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(res.rows_affected() > 0)
+        Self::update_bbox_on(&self.pool, layer_id).await
     }
 
     async fn set_bbox(
@@ -329,6 +363,16 @@ impl LayerRepo for PgLayerRepo {
         check_id(id)?;
         let res = sqlx::query("DELETE FROM layers WHERE id = $1::uuid")
             .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    async fn rename(&self, id: &str, new_name: &str) -> Result<bool> {
+        check_id(id)?;
+        let res = sqlx::query("UPDATE layers SET name = $2 WHERE id = $1::uuid")
+            .bind(id)
+            .bind(new_name)
             .execute(&self.pool)
             .await?;
         Ok(res.rows_affected() > 0)

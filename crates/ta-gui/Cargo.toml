@@ -18,7 +18,10 @@ ta-core.workspace = true
 ta-db.workspace = true
 # GDAL (SHP/GeoJSON/GPKG + GeoTIFF) e CSV-XY são caminhos de import do GUI;
 # libgdal é link dinâmico (pré-requisito do host, ver README).
-ta-gis = { workspace = true, features = ["gdal", "csv"] }
+# `geojson` alimenta a exportação da camada ativa (menu Arquivo → Exportar).
+ta-gis = { workspace = true, features = ["gdal", "csv", "geojson"] }
+# Config de workbench (persona/janela de boas-vindas) em JSON.
+serde.workspace = true
 # Leitura direta da banda (downsample) p/ textura egui.
 gdal.workspace = true
 geo-types.workspace = true

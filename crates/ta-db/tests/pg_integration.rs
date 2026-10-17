@@ -428,3 +428,189 @@ async fn edicao_por_id_update_e_delete() {
 
     pool.close().await;
 }
+
+// ---------------------------------------------------------------------------
+// v0.2 — rename de projetos/camadas + processamento PostGIS (ops.rs)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rename_projeto_e_camada_v0_2() {
+    if !pg_enabled() {
+        println!("skipped (defina TA_TEST_PG=1 com um PostGIS no TA_PG_DSN)");
+        return;
+    }
+    let pool = test_pool().await;
+    let projects = PgProjectRepo::new(pool.clone());
+    let layers = PgLayerRepo::new(pool.clone());
+    let (project, layer) = make_project_layer(&pool).await;
+
+    assert!(
+        projects
+            .rename(&project.id, &unique_name("renomeado"))
+            .await
+            .unwrap()
+    );
+    let renamed = projects
+        .get(&project.id)
+        .await
+        .unwrap()
+        .expect("projeto existe");
+    assert!(renamed.name.starts_with("renomeado"));
+
+    assert!(
+        layers
+            .rename(&layer.id, &unique_name("camada_re"))
+            .await
+            .unwrap()
+    );
+    let layer_re = layers.get(&layer.id).await.unwrap().expect("camada existe");
+    assert!(layer_re.name.starts_with("camada_re"));
+
+    // Renomear ausente → Ok(false), sem erro.
+    assert!(
+        !projects
+            .rename("00000000-0000-0000-0000-000000000000", "x")
+            .await
+            .unwrap()
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn ops_buffer_intersecao_uniao_v0_2() {
+    use ta_db::ops;
+    if !pg_enabled() {
+        println!("skipped (defina TA_TEST_PG=1 com um PostGIS no TA_PG_DSN)");
+        return;
+    }
+    let pool = test_pool().await;
+    let projects = PgProjectRepo::new(pool.clone());
+    let layers = PgLayerRepo::new(pool.clone());
+    let features = PgFeatureRepo::new(pool.clone());
+
+    let project = projects
+        .create(&Project {
+            id: String::new(),
+            name: unique_name("ops-proj"),
+            srid: TARGET_SRID,
+            created_at: time::OffsetDateTime::now_utc(),
+        })
+        .await
+        .unwrap();
+
+    // Duas camadas de polígonos que se sobrepõem (mesmo centro, r=1 e r=0.5).
+    let mut layer_ids = Vec::new();
+    for (name, r) in [
+        (unique_name("ops-a"), 1.0_f64),
+        (unique_name("ops-b"), 0.5_f64),
+    ] {
+        let layer = layers
+            .add(&Layer {
+                id: String::new(),
+                project_id: project.id.clone(),
+                name,
+                geom_type: GeomType::Polygon,
+                srid: TARGET_SRID,
+                source_uri: "test://ops".into(),
+            })
+            .await
+            .unwrap();
+        features
+            .bulk_insert(
+                &layer.id,
+                vec![Feature::new(
+                    geo_types::Geometry::Polygon(sample_polygon(-60.0, -10.0, r)),
+                    serde_json::json!({}),
+                )],
+            )
+            .await
+            .unwrap();
+        layer_ids.push(layer.id);
+    }
+    let la = &layer_ids[0];
+    let lb = &layer_ids[1];
+
+    // Buffer: gera camada derivada com a(s) geometria(s) expandidas.
+    let buf = ops::buffer(&pool, &project.id, la, 0.1, &unique_name("buf"))
+        .await
+        .unwrap();
+    assert_eq!(buf.geom_type, GeomType::GeometryCollection);
+    assert!(buf.source_uri.starts_with("postgis://buffer/"));
+    assert_eq!(features.list_with_ids(&buf.id).await.unwrap().len(), 1);
+
+    // Interseção A ∩ B: o quadrado interno — 1 feição não vazia.
+    let inter = ops::intersection(&pool, &project.id, la, lb, &unique_name("inter"))
+        .await
+        .unwrap();
+    assert_eq!(features.list_with_ids(&inter.id).await.unwrap().len(), 1);
+
+    // União: dissolve tudo em 1 multi-geom; attrs registram a camada fonte
+    // via agregado `min(f.layer_id)::text` (corrige o 42803 do gate).
+    let uni = ops::union(&pool, &project.id, la, &unique_name("uni"))
+        .await
+        .unwrap();
+    let uni_rows = features.list_with_ids(&uni.id).await.unwrap();
+    assert_eq!(uni_rows.len(), 1);
+    assert_eq!(
+        uni_rows[0].1.attrs["source"].as_str(),
+        Some(la.as_str()),
+        "attrs de união devem registrar a camada fonte"
+    );
+
+    // União com fonte que quebra o INSERT…SELECT (id não-uuid falha no cast
+    // $2::uuid DEPOIS de criar a camada) → erro E rollback: sem camada órfã.
+    let ghost_source = unique_name("nao-e-uuid");
+    let rollback_name = unique_name("uni_rollback");
+    assert!(
+        ops::union(&pool, &project.id, &ghost_source, &rollback_name)
+            .await
+            .is_err()
+    );
+    assert!(
+        !layers
+            .list_for_project(&project.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|l| l.name == rollback_name),
+        "erro SQL no meio da op não pode deixar camada derivada órfã"
+    );
+
+    // Interseção de camadas sem sobreposição → erro (sem camada órfã).
+    let lc = layers
+        .add(&Layer {
+            id: String::new(),
+            project_id: project.id.clone(),
+            name: unique_name("ops-c"),
+            geom_type: GeomType::Polygon,
+            srid: TARGET_SRID,
+            source_uri: "test://ops".into(),
+        })
+        .await
+        .unwrap();
+    features
+        .bulk_insert(
+            &lc.id,
+            vec![Feature::new(
+                geo_types::Geometry::Polygon(sample_polygon(10.0, 10.0, 0.5)),
+                serde_json::json!({}),
+            )],
+        )
+        .await
+        .unwrap();
+    let orphan_name = unique_name("vazia");
+    assert!(
+        ops::intersection(&pool, &project.id, la, &lc.id, &orphan_name)
+            .await
+            .is_err()
+    );
+    let leftovers = layers.list_for_project(&project.id).await.unwrap();
+    assert!(
+        !leftovers.iter().any(|l| l.name == orphan_name),
+        "camada derivada vazia não pode sobrar"
+    );
+
+    // Cleanup: deletar o projeto derruba as camadas derivadas (CASCADE).
+    assert!(projects.delete(&project.id).await.unwrap());
+    pool.close().await;
+}

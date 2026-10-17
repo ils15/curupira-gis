@@ -227,6 +227,11 @@ impl MapViewEgui {
         &self.viewport
     }
 
+    /// Viewport mutável (preset de escala da status bar — v0.2).
+    pub fn viewport_mut(&mut self) -> &mut Viewport {
+        &mut self.viewport
+    }
+
     /// Última posição de mundo sob o cursor (status bar).
     pub fn cursor_world(&self) -> Option<(f64, f64)> {
         self.cursor_world

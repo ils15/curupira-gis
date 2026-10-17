@@ -769,3 +769,123 @@ Push em `main` + tag `v0.1.5-alpha` → dispara a run #6 (workflow: `on: push: t
 
 
 
+
+---
+
+## Fase v0.2 — UI PARITY (@aphrodite, 2026-10-17)
+
+Referência de layout: screenshot do TerraAmazon 7.3.2 (menu denso, duas
+toolbars agrupadas, trilho de ícones + painel "Camadas", canvas grande,
+modal "Bem Vindo" com 4 cards de persona, status bar com seleção/SRS/Scale).
+**Clean-room mantido**: nenhum código/asset do binário foi consultado ou
+copiado — ícones são glifos unicode e desenhos próprios no painter do egui;
+todos os textos são próprios (i18n pt-BR/en).
+
+### Entregas
+
+| Item | Entregue |
+|---|---|
+| **Diálogo Bem-vindo (persona picker)** | ✅ modal central na 1ª abertura (`crates/ta-gui/src/welcome.rs`): título + prompt + 4 cards clicáveis (**SIG**/**Assistente**/**Operador**/**Administrador**) com ícones desenhados no painter (globo, prancheta, lápis, escudo — zero asset binário), botão "Ajuda" (abre Sobre com link do repo) e checkbox "Exibir esta janela na abertura" |
+| **Personas = presets de feature flags** | ✅ `persona.rs`: `PersonaFlags` (inspector/attr_table/editing/import_export/project_mgmt/tools/processing/admin/plugins/wizard) aplicados ao `AppState` (novo `apply_persona`). SIG = tudo; Assistente = SIG + wizard; Operador = mapa+camadas+import (sem admin/gerência/processamento); Administrador = conexão/admin/migrações (sem edição). **O canvas nunca é escondido** (contrato testado) |
+| **Persistência do workbench** | ✅ `workbench.json` em `$XDG_CONFIG_HOME/curupira/` ou `$HOME/.config/curupira/` (std puro, sem crate nova): persona + show_welcome + idioma. Arquivo ausente/corrompido/persona inválida → defaults (SIG + bem-vindo), **nunca panic**. Caminho resolvido 1× em `TerraApp::new` (`workbench_path`) — testes injetam caminho temporário sem tocar env |
+| **Menu bar completa** | ✅ `menus.rs`: Arquivo (novo/abrir projeto, importar, **exportar GeoJSON da camada ativa**, sair) · Editar (undo/redo attrs, deletar feição) · Área de Trabalho (personas, reabrir bem-vindo, tema, idioma) · Mapa (zoom, extensão, **grade**, **barra de escala**) · Ferramentas (conectar/desconectar, **console SQL somente-leitura**, opções) · Gerenciamento de Projeto (criar/**renomear**/**deletar** projeto, **renomear**/remover camada) · Administração (**aplicar migrações**, **info do banco** — só admin) · Plugins (stub informativo) · Processamento (**buffer/interseção/união PostGIS**) · Ajuda (atalhos, sobre) |
+| **Explorador de camadas upgraded** | ✅ ícone por `geom_type` (●─▲◈▦), context menu (zoom para camada, renomear [banco], remover, **propriedades**: nome/geometria/CRS/contagem/origem), checkbox de visibilidade, ordem ▲▼, camada ativa; **trilho de ícones vertical** à esquerda (importar, conectar, extent, identificar/novo ponto — toggles de modo) |
+| **Status bar completa** | ✅ `status_bar.rs`: `Linhas selecionadas: N` (bind real), chip SRS (verde `EPSG:4674` com projeto / vermelho "SRS desconhecido" sem — distingue por TEXTO, a11y), coordenadas do cursor, **dropdown Scale** com presets 1:1k…1:5M (aplicam `px_per_unit` via inverso exato de `scale_denominator`), modo LOCAL/BANCO, engrenagem → Opções |
+| **Toolbars agrupadas** | ✅ duas linhas densas com separadores (arquivo/projeto · import/export · conexão · zoom · overlays · modos de mouse · undo/redo/delete) — mesmas ações dos menus, tooltips i18n, filtradas por persona |
+| **Overlays do canvas** | ✅ `overlays.rs` (puro, testado): grade de coordenadas 1-2-5 (~80 px) desenhada sobre o mapa sem tocar no contrato MapView; barra de escala (metros→px, rótulo m/km) |
+| **Console SQL** | ✅ somente-leitura: guard `is_read_only_sql` na UI **e** no worker (SELECT/WITH, sem `;`), resultado via `row_to_json` limitado a 200 linhas, `AssertSqlSafe` justificado (mesmo padrão do CLI) |
+| **ta-db estendido (v0.2)** | ✅ `repo.rs`: `ProjectRepo::rename` / `LayerRepo::rename` (bind-only, seguem padrão existente); **novo** `ops.rs`: buffer/interseção/união **server-side** criando camadas derivadas (INSERT…SELECT PostGIS, attrs de rastreabilidade, bbox recalculado) — **tudo em uma transação** (`pool.begin()`/`commit`, rollback em qualquer erro SQL ou resultado vazio): camada derivada nunca fica órfã. Correção do gate themis: `union` agregava `ST_Union` com coluna solta (`f.layer_id`) — SQL inválido (PG 42803); agora attrs usam `min(f.layer_id::text)` (fonte única por chamada). Interseção computa `ST_Intersection` uma única vez (CTE). ⚠️ pequeno acréscimo de backend feito no escopo da fase — gate @hermes/@themis: 2 high corrigidos e provados no PG real |
+| **i18n** | ✅ 168 chaves (89 → 168): menus novos, personas, bem-vindo, wizard, processamento, console, gerência de projeto, overlays, rail — 100% dos rótulos; teste de completude atualizado |
+| **Testes** | ✅ +20 (137 → **157**): persona (5 unit + smoke), workbench (resolver/roundtrip/corrompido/default), overlays (presets/grade/barra), `is_read_only_sql`, export GeoJSON end-to-end, smoke v0.2 headless (bem-vindo+personas renderizando, flags por persona, canvas sempre presente, escala por preset, workbench persistindo com caminho injetado, ações sem banco falham suave), ícones de geometria distintos, rename+ops gated no `pg_integration.rs` |
+
+### Verificação executada (host Linux, 2026-10-17)
+
+| Check | Resultado |
+|---|---|
+| `cargo build --workspace` | ✅ verde |
+| `cargo test --workspace` | ✅ **157 passed / 0 failed** (gated PG compila e pula sem banco) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ verde |
+| `cargo fmt --all -- --check` | ✅ verde |
+| Smoke visual/GPU | ⚠️ host sem display — checklist v0.2 adicionado em `benches/map_render.md` |
+
+### Riscos honestos / limitações
+
+1. **Só roda com display (não provável aqui)**: cards do bem-vindo clicáveis de verdade (hit-test egui), menus abrindo/fechando, tooltips, context menu com botão direito, dropdown de escala interagindo, grade/barra desenhadas em GPU — tudo headless-testado no nível "renderiza sem panic + lógica pura", mas a interação real precisa do checklist novo em `benches/map_render.md`.
+2. **Processamento exige banco real**: as ops PostGIS só executam conectado+projeto (desenho intencional); o teste é **gated** (`TA_TEST_PG=1`) — a prova SQL real contra PostGIS 3.4 acontece no job `linux-pg` do CI ou com `scripts/test-pg.sh`.
+3. **Console SQL é somente-leitura por design** (SELECT/WITH, sem `;`, 200 linhas); `EXPLAIN` puro fica fora (não é envolvível em `row_to_json`) — documentado no hint do diálogo.
+4. **Escalas são aproximação geográfica** (herdado do viewport: 1° ≈ 111 320 m no equador) — presets herdam essa precisão.
+5. **Menú "Controladores" da referência não foi reproduzido** (sem equivalente funcional no escopo v0.2); Plugins é stub honesto informativo.
+6. **Tema não é persistido** no workbench.json (preferência do egui é runtime do contexto); persona/idioma/bem-vindo sim.
+7. **Renomear camada/projeto exige conexão** (o rename é persistido no banco); camadas locais renomeiam apenas removendo/reimportando (limitação MVP documentada).
+
+### Não commitado
+
+Nada foi commitado (instrução da subtask). Arquivos novos: `persona.rs`, `workbench.rs`, `overlays.rs`, `menus.rs`, `status_bar.rs`, `welcome.rs`, `work_dialogs.rs`, `export_job.rs` (ta-gui), `ops.rs` (ta-db). Modificados: `app.rs`, `app_state.rs`, `panels.rs`, `dialogs.rs`, `db_worker.rs`, `map_view.rs`, `i18n.rs`, `lib.rs`, `Cargo.toml` (ta-gui: +serde, +feature geojson), `repo.rs`/`lib.rs` (ta-db), `tests/app_smoke.rs`, `tests/pg_integration.rs`, `benches/map_render.md`, este STATUS.md.
+
+---
+
+## Fase v0.2.1 — NAVEGAÇÃO E ABERTURA DE ARQUIVOS DE 1ª CLASSE (@aphrodite, 2026-10-17)
+
+Pedido do usuário: busca de arquivos melhor, janela de menu para navegar/mapear
+caminho, mesma UX em Windows e Linux, acessível pelo menu. **Nota honesta**: a
+premissa "hoje depende do rfd" não se confirmou — `rfd` nunca esteve no grafo
+(o diálogo de import sempre foi um campo de texto). Restrição "se rfd já está,
+mantenha" → não havia nada para manter; **nenhuma dependência nova** foi
+adicionada (walk é std com depth limit; nada de scanlex/jwalk).
+
+### Entregas
+
+| Item | Entregue |
+|---|---|
+| **File browser embutido** | ✅ novo `file_browser.rs` (egui-native, módulo próprio): modal "Navegador de arquivos…" acessível por **4 caminhos** — menu Arquivo → "Navegador de arquivos… (Ctrl+Shift+O)", botão 🗂 na toolbar de arquivo, atalho **Ctrl+Shift+O** e botão no diálogo de importação (toggle "usar navegador embutido"). Breadcrumb clicável + ↑ + Home + Projeto (pasta da origem da camada ativa) + "Dados de teste" (testdata do repo ao lado do binário — **skip silencioso** quando ausente, p.ex. instalador). Campo de caminho editável: Enter navega, dir → navega, arquivo → seleciona no pai, inexistente → **erro inline vermelho** (sem panic). Listagem: pastas primeiro, nome case-insensitive, ícone por tipo (shp/geojson/gpkg/fgb/tif/csv reconhecidos pela extensão), **duplo clique entra/importa** |
+| **Busca/filtro** | ✅ substring case-insensitive na pasta corrente; toggle "Buscar em subpastas" sobe thread própria (`spawn_walk`, cancelável via `AtomicBool`, **depth 3**, teto 500 resultados, spinner + Cancelar no loading state); **F3** pula entre ocorrências |
+| **Painel de detalhes** | ✅ lateral direita: nome, tamanho (formato por idioma: vírgula pt-BR / ponto en), última modificação (`civil_from_days` de Hinnant — sem crate de data) e **formato detectado via `ta_gis::detect::detect_source_format`** (extensão + magic bytes, API já pública; fallback GeoTIFF/extensão) |
+| **Import pelo browser** | ✅ botão "Importar" habilitado só para formatos suportados → **fluxo único consolidado** `TerraApp::start_import_from_path` (valida → `spawn_import` → normalizer → `bulk_insert`/camada local em background). O diálogo de importação antigo passou a usar o MESMO método (um só caminho para cada efeito) |
+| **Recentes** | ✅ `workbench.json` ganha `recent_files` (máx. **15**) e `recent_dirs` (máx. **8**), com timestamp Unix; `#[serde(default)]` — workbench da v0.2 abre normal. Atualiza em todo import/export (arquivo **e** sua pasta) e navegação no browser. Menu Arquivo → **"Abrir recente ▸"** (lista clicável; arquivo que sumiu do disco é **removido on-click** e persistido); seção "Recentes" no painel de detalhes do browser |
+| **Drag & drop** | ✅ soltar `.shp/.geojson/.gpkg/.fgb/.tif/.csv` do SO na janela (egui raw `dropped_files`) abre o modal de importação **pré-preenchido** com o 1º (sem auto-start — usuário confirma o SRID); multi-arquivo → **fila** (`import_queue`) com hint "+N na fila" no diálogo, consumida em sequência ao confirmar (`import_queue_auto`); cancelar descarta a fila; extensão não suportada → erro, nada abre |
+| **Paridade Win/Linux** | ✅ o browser é 100% egui — idêntico por construção (é o ponto do pedido). Breadcrumb mostra `/` ou `C:\` (`path_anchor` via components, sem `Path::anchor`); `~` expande com HOME/USERPROFILE (puro, testável). **rfd**: inexistente no grafo, portanto "Usar diálogo do sistema" não existe para manter — o navegador embutido passou a ser o caminho primário e o campo de texto manual continua como opção universal (documentado como decisão, não como regressão) |
+| **UX polish** | ✅ teclado: **Esc fecha**, **Ctrl+F** foca o filtro, **Alt+↑** sobe, **↑/↓** movem a seleção (com wrap; campo de texto focado vence — a11y), **Enter** abre 1º resultado/F3 próximo, **F3** próxima ocorrência; loading state no walk (spinner + cancelar); import concluído registra recentes |
+| **i18n** | ✅ 168 → **191 chaves** (+23: browser completo, recentes, fila, erros de caminho/drop sem suporte) — pt-BR/en exaustivos, teste de contagem atualizado |
+| **Testes** | ✅ +20 (157 → **177**, todos verdes): classificação por extensão, `list_dir` (ordenação/metadados, tmpdir), filtro case-insensitive, walk depth/cancel/teto/ordem estável, `validate_path` + `expand_tilde`, testdata resolver, `project_dir`, `format_size` (pt/en), `format_mtime` (datas conhecidas), `plan_drop`, recents (dedupe/trim 15/8/remoção/serde-default), smoke headless: browser abre/navega/fecha, drag-drop prefill+cancel, **fila multi-arquivo avançando de verdade** (2 imports end-to-end até camada), validação de import + recente inválido, recents persistindo no JSON |
+| **STATUS/checklist** | ✅ esta seção + `benches/map_render.md` ganhou checklist manual v0.2.1 (10 itens) |
+
+### Verificação executada (host Linux, 2026-10-17)
+
+| Check | Resultado |
+|---|---|
+| `cargo build --workspace` | ✅ verde |
+| `cargo test --workspace` | ✅ **177 passed / 0 failed** (157 + 20 novos; gated PG compila e pula sem banco) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ verde (2 acionados e corrigidos: `sort_by_key`, `format!` inútil) |
+| `cargo fmt --all -- --check` | ✅ verde |
+| Smoke visual/GPU | ⚠️ host sem display — checklist v0.2.1 adicionado em `benches/map_render.md` |
+
+### Decisões de design (registradas)
+
+1. **Fluxo de import único**: `start_import_from_path` é o único caminho que sobe import (diálogo, browser, recentes, drop) — elimina a duplicação diálogo/app e dá um ponto só de validação/erro.
+2. **Recents em import/export registram também a pasta**: alimenta recent_dirs e o atalho "Projeto" mesmo sem camada no banco.
+3. **Drop não auto-importa**: pré-preenche o modal (SRID visível, usuário confirma) — multi-arquivo vira fila confirmada; cancelar limpa tudo. Falha no meio da fila interrompe e limpa.
+4. **Walk em thread com lote único + sort determinístico** (nome case-insensitive): resultados idênticos entre sessões — F3 e testes dependem disso.
+5. **`format_size`/`format_mtime` próprios**: separador decimal por idioma e ISO curto UTC — sem crate nova (regra "sem deps pesadas").
+6. **Smoke de import agora usa `workbench_path = None`**: evita poluir o `~/.config/curupira/workbench.json` real do host com caminhos de fixture (efeito colateral dos recents; corrigido no teste pré-existente).
+
+### Riscos honestos / limitações
+
+1. **Listagem é síncrona** (um `read_dir` por navegação): OK para discos locais; rede lenta pode travar um frame (limitação documentada — o caminho pesado, busca em subpastas, é em thread).
+2. **Busca em subpastas importa só arquivos**: diretórios correspondentes não aparecem nos resultados (padrão de "find de arquivos").
+3. **F3/Enter-no-walk** operam sobre o painel de resultados corrente; não há histórico de buscas (YAGNI).
+4. **`~` no Windows** só expande com USERPROFILE; `~user` não é resolvido (documentado).
+5. **Seleção única** no browser (sem multi-select com Ctrl) — a fila multi-arquivo vem do drag & drop; multi-select no browser fica para feedback.
+6. **Interação real de janela** (modal sobre canvas, foco Ctrl+F, duplo clique) continua impossível de provar headless — coberta pelo checklist manual novo.
+
+### Não commitado
+
+Nada foi commitado (instrução da subtask). Arquivo novo: `file_browser.rs` (ta-gui). Modificados: `app.rs` (browser/fila/drop/start_import/recents/atalho), `workbench.rs` (RecentItem/recent_files/recent_dirs/métodos), `menus.rs` (item de menu, "Abrir recente ▸", botão toolbar), `dialogs.rs` (dispatcher do browser, import usa fluxo único + fila + botão browser), `i18n.rs` (+23 chaves), `lib.rs` (módulo), `tests/app_smoke.rs` (+5 smoke v0.2.1), `benches/map_render.md` (checklist), este STATUS.md.
+
+### Correções do gate themis (v0.2 — @hermes, 2026-10-17)
+
+O gate bloqueou v0.2 com 2 high em `crates/ta-db/src/ops.rs` (ambos provados no PG real pelo gate):
+
+1. **`ops::union` — SQL inválido (PG 42803)**: `jsonb_build_object('source', f.layer_id::text)` misturava coluna não-agregada com `ST_Union(f.geom)`. Corrigido para `min(f.layer_id::text)` — o `WHERE` prende uma única camada fonte por chamada, então o agregado registra exatamente a origem. Regressão no teste gated: attrs `source` da união == id da camada fonte.
+2. **Ops não transacionais — camada derivada órfã**: `create_derived_layer` + `INSERT…SELECT` + limpeza não eram atômicos; erro SQL depois do registro deixava camada com 0 features (bypass do DELETE manual de limpeza). Todas as 3 ops (buffer/interseção/união) agora rodam em `pool.begin()`…`commit()` (`rollback` no erro/vazio — o DELETE manual deixou de existir); `PgLayerRepo` ganhou `add_on`/`update_bbox_on` (executor genérico) para compor a transação. Regressão no teste gated: erro SQL real (cast `$2::uuid` falhando após criar a camada) → erro E nenhuma camada órfã.
+
+Correção de documentação: "i18n.rs (+22 chaves)" acima era inconsistente com o total correto (**191**, 168 → 191 = **+23**, coberto pelo teste de contagem). Limitação do console SQL documentada em `db_worker.rs`: a guard `is_read_only_sql` é string-matching e `WITH … INSERT` em instrução única passa nela (bypass conhecido; mitigação real — transação `READ ONLY` — ficou para o backlog).

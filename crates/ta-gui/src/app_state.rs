@@ -11,6 +11,7 @@ use ta_core::style::Style;
 
 use crate::db_worker::DbWorker;
 use crate::map_view::{LayerFeature, LayerHandle, MapView};
+use crate::persona::{Persona, PersonaFlags};
 
 /// Modo de interação corrente do cursor no mapa.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -103,7 +104,7 @@ impl GuiLayer {
 }
 
 /// Estado completo da sessão.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AppState {
     pub i18n: crate::i18n::I18n,
     pub conn: Conn,
@@ -116,11 +117,52 @@ pub struct AppState {
     pub edit_mode: EditMode,
     pub undo_stack: Vec<AttrsEdit>,
     pub redo_stack: Vec<AttrsEdit>,
+    /// Persona corrente e o preset de painéis/menus derivado (v0.2).
+    pub persona: Persona,
+    pub flags: PersonaFlags,
+    /// Overlays do canvas (Mapa → grade / barra de escala).
+    pub grid_on: bool,
+    pub scale_bar_on: bool,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        let persona = Persona::default();
+        Self {
+            i18n: crate::i18n::I18n::default(),
+            conn: Conn::default(),
+            project: None,
+            layers: Vec::new(),
+            active_layer: None,
+            selection: None,
+            edit_mode: EditMode::default(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            persona,
+            flags: persona.flags(),
+            grid_on: false,
+            scale_bar_on: true,
+        }
+    }
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Aplica a persona: preset de flags + persona corrente.
+    ///
+    /// O canvas central NUNCA é desligado por persona (contrato da fase) —
+    /// os flags só filtram menus/painéis auxiliares.
+    pub fn apply_persona(&mut self, persona: Persona) {
+        self.persona = persona;
+        self.flags = persona.flags();
+    }
+
+    /// Quantidade de linhas selecionadas (status bar — bind real à seleção).
+    pub fn selection_count(&self) -> usize {
+        usize::from(self.selection.is_some())
     }
 
     /// Espelha o estado no `MapView` (chamar após qualquer mudança de dados).
@@ -405,5 +447,45 @@ mod tests {
         let l = AppState::new_layer_for("p1", "nome", GeomType::Point, "/tmp/x");
         assert_eq!(l.srid, 4674);
         assert_eq!(l.project_id, "p1");
+    }
+
+    #[test]
+    fn default_nasce_sig_com_flags_coerentes() {
+        let st = AppState::new();
+        assert_eq!(st.persona, Persona::Sig);
+        assert!(st.flags.editing, "SIG tem edição");
+        assert!(st.flags.inspector && st.flags.attr_table);
+        // Overlays: grade desligada, barra de escala ligada (default útil).
+        assert!(!st.grid_on);
+        assert!(st.scale_bar_on);
+    }
+
+    #[test]
+    fn apply_persona_troca_flags_sem_apagar_sessao() {
+        let mut st = AppState::new();
+        st.layers.push(layer_point("l", 1));
+        st.selection = Some((0, 0));
+
+        st.apply_persona(Persona::Administrator);
+        assert_eq!(st.persona, Persona::Administrator);
+        assert!(!st.flags.editing, "admin não edita");
+        assert!(st.flags.admin, "admin vê administração");
+        // Persona NÃO toca nos dados da sessão (camadas/seleção ficam).
+        assert_eq!(st.layers.len(), 1);
+        assert_eq!(st.selection_count(), 1);
+
+        st.apply_persona(Persona::Operator);
+        assert!(!st.flags.admin, "operador não vê administração");
+        assert!(st.flags.editing && st.flags.import_export);
+        // De volta ao SIG: flags completos, sessão intacta.
+        st.apply_persona(Persona::Sig);
+        assert!(st.flags.processing && st.flags.plugins && st.flags.attr_table);
+        assert_eq!(st.layers.len(), 1);
+    }
+
+    #[test]
+    fn selecao_zero_quando_nada_marcado() {
+        let st = AppState::new();
+        assert_eq!(st.selection_count(), 0);
     }
 }

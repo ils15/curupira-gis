@@ -73,10 +73,41 @@ datasets em memória.
 Este host não tem X11/Wayland (`DISPLAY` vazio, sem xvfb). O que ficou
 coberto por testes headless (`cargo test`): transformações tela↔mundo, LOD,
 hit-test, render produzindo shapes/tesselação, shell completo sem panic,
-import local end-to-end (thread + canal + mapa), i18n. O que precisa de
-olhos humanos em máquina com display:
+import local end-to-end (thread + canal + mapa), i18n, **v0.2: bem-vindo
+(personas) renderizando, flags por persona, overlays de grade/barra de
+escala, preset de escala, persistência do workbench (caminho injetado)**.
+O que precisa de olhos humanos em máquina com display:
 
-- [ ] `cargo run -p ta-gui` abre janela 1280×800; dark/light alternam no menu Ver (contraste AA nos dois).
+### v0.2 — paridade de UI (novo)
+
+- [ ] 1ª abertura mostra o modal "Bem-vindo" central (logo tipográfico + 4 cards com ícones desenhados + "Ajuda" + checkbox "Exibir esta janela na abertura"); clicar num card aplica a persona e fecha.
+- [ ] Com o checkbox desmarcado, reiniciar o app NÃO reabre o bem-vindo; marcado, reabre (`~/.config/curupira/workbench.json`).
+- [ ] Menu Área de Trabalho → trocar persona muda os menus visíveis: Operador (sem Administração/Gerenciamento/Processamento), Administrador (sem Editar/importar/tabela), Assistente (extra: wizard abre com 4 passos).
+- [ ] O canvas central NUNCA desaparece em nenhuma persona.
+- [ ] Menu Arquivo → Exportar camada ativa gera GeoJSON válido (conferir num leitor); importar via menu/trilho segue funcionando.
+- [ ] Barra de status: "Linhas selecionadas" muda ao clicar numa feição; chip SRS verde "EPSG:4674" com projeto, vermelho "SRS desconhecido" sem; dropdown Scale troca a escala (conferir contra o zoom com a roda); engrenagem abre Opções.
+- [ ] Mapa → Grade: meridianos/paralelos aparecem com espaçamento "bonito" em todos os zooms; Barra de escala ancla no canto inferior esquerdo com rótulo coerente (m/km).
+- [ ] Árvore de camadas: ícone por geometria, botão direito abre contexto (zoom para camada, renomear [com banco], remover, propriedades com CRS/contagem/origem).
+- [ ] Processamento (com banco+projeto): Buffer/Interseção/União criam camada derivada visível; interseção sem sobreposição mostra erro legível e NÃO deixa camada órfã.
+- [ ] Console SQL (com banco): SELECT simples lista linhas; `DROP TABLE` é recusado com mensagem; resultado limitado a 200 linhas.
+- [ ] Toolbars: grupos separados por divisórias, todos os botões com tooltip i18n; dark e light mantêm contraste AA.
+
+### v0.2.1 — navegador de arquivos, recentes, drag & drop (novo)
+
+- [ ] Menu Arquivo → "Navegador de arquivos…", botão 🗂 na toolbar, atalho Ctrl+Shift+O e o botão dentro do diálogo de importar abrem o MESMO modal; Esc fecha nos quatro caminhos.
+- [ ] Breadcrumb clicável navega; ↑ sobe; Home/Projeto habilitam quando aplicável; "Dados de teste" só aparece com `testdata/` presente (no dev aparece; no instalador, skip silencioso).
+- [ ] Colar caminho inválido + Enter mostra erro inline vermelho; colar um ARQUIVO seleciona-o no diretório-pai; duplo clique entra em pasta / importa arquivo suportado (shp/geojson/gpkg/fgb/tif/csv).
+- [ ] Filtro case-insensitive na pasta corrente; com "Buscar em subpastas" ligado aparece spinner "Buscando…" com botão Cancelar; resultados entram na listagem e F3 pula entre eles; Enter no campo de caminho navega; setas movem a seleção (com campo de texto focado, setas pertencem ao texto); Ctrl+F foca o filtro.
+- [ ] Painel de detalhes: nome, tamanho (vírgula em pt-BR, ponto em en), última modificação e formato detectado (Shapefile/GeoJSON/… via magic bytes do `ta-gis::detect`).
+- [ ] "Importar" só habilita com arquivo suportado selecionado; importar pelo navegador registra o arquivo (+ pasta) em "Abrir recente ▸" e na seção Recentes do navegador.
+- [ ] "Abrir recente ▸": clicar num existente importa direto; clicar num que sumiu do disco remove-o da lista na hora (persistido).
+- [ ] Arrastar um .geojson do SO para a janela abre o modal de importação pré-preenchido; arrastar vários arquivos mostra "+N na fila" e importa em sequência; cancelar o diálogo descarta a fila; arrastar .txt mostra erro e não abre nada.
+- [ ] workbench.json: `recent_files` (máx. 15) e `recent_dirs` (máx. 8) persistem entre sessões; workbench antigo SEM essas chaves abre normal (defaults serde).
+- [ ] Windows: navegador idêntico (é 100% egui); breadcrumb mostra `C:\`; til `~` não expande sem HOME (comportamento documentado).
+
+### Legado (Fase 3 — manter verde)
+
+- [ ] `cargo run -p ta-gui` abre janela 1280×800; dark/light alternam no menu Área de Trabalho → Tema (contraste AA nos dois).
 - [ ] Pan com arraste, zoom com roda ancorada no cursor, botões +/−, Esc cancela modo novo ponto, Ctrl+O/Ctrl+I/Ctrl+Z/Ctrl+Y.
 - [ ] Importar `testdata/bench/bench_polys.shp` (local): 10k polígonos com preenchimento nos convexos, contorno em todos; zoom-out mantém fluidez (LOD).
 - [ ] Importar `testdata/bench/bench_points.csv` (SRID 4674): 50k pontos; zoom-in recupera todos (stride zera).

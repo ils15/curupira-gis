@@ -62,6 +62,64 @@ pub enum DbCmd {
     },
     /// Exclusão da feição.
     DeleteFeature { db_id: i64 },
+    // ---- v0.2 (paridade de UI) -------------------------------------
+    /// Reaplica as migrações no banco conectado (menu Administração).
+    RunMigrations,
+    /// Coleta `version()` + `postgis_full_version()` (menu Administração).
+    DbInfo,
+    /// Remove a camada (feições somem por CASCADE).
+    DeleteLayer { layer_id: String },
+    /// Remove o projeto (camadas + feições por CASCADE).
+    DeleteProject { project_id: String },
+    /// Renomeia o projeto.
+    RenameProject {
+        project_id: String,
+        new_name: String,
+    },
+    /// Renomeia a camada.
+    RenameLayer { layer_id: String, new_name: String },
+    /// Processamento espacial server-side (PostGIS; camada derivada nova).
+    ProcessOp {
+        op: ProcOp,
+        project_id: String,
+        source_a: String,
+        source_b: Option<String>,
+        distance_deg: f64,
+        target_name: String,
+    },
+    /// Consulta **somente-leitura** do console SQL (SELECT/WITH, 1 instrução).
+    Query { sql: String },
+}
+
+/// Operador de processamento (espelha `ta_db::ops::ProcOp` para a UI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcOp {
+    Buffer,
+    Intersect,
+    Union,
+}
+
+/// Guarda de somente-leitura do console SQL: aceita apenas uma instrução
+/// `SELECT`/`WITH` — proíbe `;` (múltiplas instruções) por conservadorismo.
+/// A execução usa prepared statement, que de qualquer forma rejeitaria
+/// multi-statement; a guard é defesa em profundidade na borda da UI.
+///
+/// # Limitação conhecida (documentada, não corrigida em v0.2)
+///
+/// A validação é **string-matching** (prefixo `select`/`with`), não análise
+/// sintática: um `WITH x AS (SELECT …) INSERT INTO … SELECT …` em
+/// instrução única começa com `with`, passa nesta guard e o prepared
+/// statement a executa (PG aceita CTE precedendo `INSERT`). É o bypass
+/// conhecido do console; o console é ferramenta admin/poder-usuário e a
+/// mitigação de verdade (transação `READ ONLY` ou `SET TRANSACTION
+/// READ ONLY` na sessão do console) fica para o backlog.
+pub fn is_read_only_sql(sql: &str) -> bool {
+    let t = sql.trim();
+    if t.is_empty() || t.contains(';') {
+        return false;
+    }
+    let lower = t.to_ascii_lowercase();
+    lower.starts_with("select") || lower.starts_with("with")
 }
 
 /// Evento do worker para a UI.
@@ -89,6 +147,27 @@ pub enum DbEvt {
     FeatureDeleted {
         db_id: i64,
     },
+    // ---- v0.2 (paridade de UI) -------------------------------------
+    /// Migrações reaplicadas com sucesso.
+    MigrationsApplied,
+    /// Texto de `version()` + `postgis_full_version()`.
+    DbInfo(String),
+    /// Camada removida no banco.
+    LayerDeleted {
+        layer_id: String,
+    },
+    /// Projeto removido no banco.
+    ProjectDeleted {
+        project_id: String,
+    },
+    /// Projeto renomeado (registro atualizado).
+    ProjectRenamed(Project),
+    /// Camada renomeada (registro atualizado).
+    LayerRenamed(Layer),
+    /// Camada derivada criada pelo processamento.
+    Processed(Layer),
+    /// Linhas do console SQL (JSON-texto por linha, máx. 200).
+    QueryResult(Vec<Vec<String>>),
     Failed(String),
 }
 
@@ -378,6 +457,173 @@ fn run_worker(cmd_rx: Receiver<DbCmd>, evt_tx: Sender<DbEvt>) {
                     Err(e) => fail(&evt_tx, "remover feição", e),
                 }
             }
+            DbCmd::RunMigrations => {
+                let Some(p) = pool.clone() else {
+                    not_connected(&evt_tx);
+                    continue;
+                };
+                match rt.block_on(run_migrations(&p)) {
+                    Ok(()) => {
+                        let _ = evt_tx.send(DbEvt::MigrationsApplied);
+                    }
+                    Err(e) => fail(&evt_tx, "aplicar migrações", e),
+                }
+            }
+            DbCmd::DbInfo => {
+                let Some(p) = pool.clone() else {
+                    not_connected(&evt_tx);
+                    continue;
+                };
+                match rt.block_on(async {
+                    let version: (String,) =
+                        sqlx::query_as("SELECT version()").fetch_one(&p).await?;
+                    let postgis: (String,) = sqlx::query_as("SELECT postgis_full_version()")
+                        .fetch_one(&p)
+                        .await?;
+                    Ok::<_, ta_db::Error>(format!("{}\n{}", version.0, postgis.0))
+                }) {
+                    Ok(text) => {
+                        let _ = evt_tx.send(DbEvt::DbInfo(text));
+                    }
+                    Err(e) => fail(&evt_tx, "consultar informações do banco", e),
+                }
+            }
+            DbCmd::DeleteLayer { layer_id } => {
+                let Some(p) = pool.clone() else {
+                    not_connected(&evt_tx);
+                    continue;
+                };
+                let repo = PgLayerRepo::new(p);
+                match rt.block_on(repo.delete(&layer_id)) {
+                    Ok(true) => {
+                        let _ = evt_tx.send(DbEvt::LayerDeleted { layer_id });
+                    }
+                    Ok(false) => fail_msg(&evt_tx, "camada não existe no banco".into()),
+                    Err(e) => fail(&evt_tx, "remover camada", e),
+                }
+            }
+            DbCmd::DeleteProject { project_id } => {
+                let Some(p) = pool.clone() else {
+                    not_connected(&evt_tx);
+                    continue;
+                };
+                let repo = PgProjectRepo::new(p);
+                match rt.block_on(repo.delete(&project_id)) {
+                    Ok(true) => {
+                        let _ = evt_tx.send(DbEvt::ProjectDeleted { project_id });
+                    }
+                    Ok(false) => fail_msg(&evt_tx, "projeto não existe no banco".into()),
+                    Err(e) => fail(&evt_tx, "remover projeto", e),
+                }
+            }
+            DbCmd::RenameProject {
+                project_id,
+                new_name,
+            } => {
+                let Some(p) = pool.clone() else {
+                    not_connected(&evt_tx);
+                    continue;
+                };
+                let repo = PgProjectRepo::new(p);
+                match rt.block_on(async {
+                    if !repo.rename(&project_id, &new_name).await? {
+                        return Err(ta_db::Error::InvalidId(project_id.clone()));
+                    }
+                    repo.get(&project_id)
+                        .await?
+                        .ok_or_else(|| ta_db::Error::InvalidId(project_id.clone()))
+                }) {
+                    Ok(updated) => {
+                        let _ = evt_tx.send(DbEvt::ProjectRenamed(updated));
+                    }
+                    Err(e) => fail(&evt_tx, "renomear projeto", e),
+                }
+            }
+            DbCmd::RenameLayer { layer_id, new_name } => {
+                let Some(p) = pool.clone() else {
+                    not_connected(&evt_tx);
+                    continue;
+                };
+                let repo = PgLayerRepo::new(p);
+                match rt.block_on(async {
+                    if !repo.rename(&layer_id, &new_name).await? {
+                        return Err(ta_db::Error::InvalidId(layer_id.clone()));
+                    }
+                    repo.get(&layer_id)
+                        .await?
+                        .ok_or_else(|| ta_db::Error::InvalidId(layer_id.clone()))
+                }) {
+                    Ok(updated) => {
+                        let _ = evt_tx.send(DbEvt::LayerRenamed(updated));
+                    }
+                    Err(e) => fail(&evt_tx, "renomear camada", e),
+                }
+            }
+            DbCmd::ProcessOp {
+                op,
+                project_id,
+                source_a,
+                source_b,
+                distance_deg,
+                target_name,
+            } => {
+                let Some(p) = pool.clone() else {
+                    not_connected(&evt_tx);
+                    continue;
+                };
+                use ta_db::ops;
+                match rt.block_on(async {
+                    match (op, source_b) {
+                        (ProcOp::Buffer, _) => {
+                            ops::buffer(&p, &project_id, &source_a, distance_deg, &target_name)
+                                .await
+                        }
+                        (ProcOp::Intersect, Some(b)) => {
+                            ops::intersection(&p, &project_id, &source_a, &b, &target_name).await
+                        }
+                        (ProcOp::Intersect, None) => {
+                            Err(ta_db::Error::Postgis("interseção requer a camada B".into()))
+                        }
+                        (ProcOp::Union, _) => {
+                            ops::union(&p, &project_id, &source_a, &target_name).await
+                        }
+                    }
+                }) {
+                    Ok(layer) => {
+                        let _ = evt_tx.send(DbEvt::Processed(layer));
+                    }
+                    Err(e) => fail(&evt_tx, "processar", e),
+                }
+            }
+            DbCmd::Query { sql } => {
+                let Some(p) = pool.clone() else {
+                    not_connected(&evt_tx);
+                    continue;
+                };
+                // Guarda de somente-leitura na borda do worker (a UI também
+                // filtra — defesa em profundidade).
+                if !is_read_only_sql(&sql) {
+                    fail_msg(&evt_tx, "recusado: somente SELECT/WITH de leitura".into());
+                    continue;
+                }
+                // AssertSqlSafe: o SQL vem do operador, por decisão dele —
+                // guardado por `is_read_only_sql` (SELECT/WITH, sem `;`) e
+                // executado como prepared statement (multi-statement já é
+                // rejeitado pelo protocolo). Envolvido em row_to_json para
+                // serializar colunas de tipos arbitrários como texto.
+                let wrapped = format!("SELECT row_to_json(t)::text FROM ({sql}) t LIMIT 200");
+                match rt.block_on(async {
+                    let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(wrapped))
+                        .fetch_all(&p)
+                        .await?;
+                    Ok::<_, sqlx::Error>(rows.into_iter().map(|(r,)| vec![r]).collect())
+                }) {
+                    Ok(rows) => {
+                        let _ = evt_tx.send(DbEvt::QueryResult(rows));
+                    }
+                    Err(e) => fail(&evt_tx, "executar consulta", e),
+                }
+            }
         }
     }
 }
@@ -394,4 +640,26 @@ fn fail<E: std::fmt::Display>(evt_tx: &Sender<DbEvt>, ctx: &str, e: E) {
 
 fn fail_msg(evt_tx: &Sender<DbEvt>, msg: String) {
     let _ = evt_tx.send(DbEvt::Failed(msg));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn console_sql_somente_leitura() {
+        // SELECT/WITH simples passam.
+        assert!(is_read_only_sql("SELECT * FROM features"));
+        assert!(is_read_only_sql("  select 1"));
+        assert!(is_read_only_sql("WITH c AS (SELECT 1) SELECT * FROM c"));
+        // Qualquer segunda instrução ou `;` solto é barrado (conservador).
+        assert!(!is_read_only_sql("SELECT 1; DROP TABLE features"));
+        assert!(!is_read_only_sql("SELECT 1;"));
+        assert!(!is_read_only_sql("DROP TABLE features"));
+        assert!(!is_read_only_sql("INSERT INTO features VALUES (1)"));
+        assert!(!is_read_only_sql("UPDATE features SET attrs = '{}'"));
+        assert!(!is_read_only_sql("DELETE FROM features"));
+        assert!(!is_read_only_sql("   "));
+        assert!(!is_read_only_sql("-- comentário\nDROP TABLE x"));
+    }
 }

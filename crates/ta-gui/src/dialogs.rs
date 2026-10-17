@@ -8,7 +8,6 @@ use egui::Id;
 use crate::app::TerraApp;
 use crate::db_worker::DbCmd;
 use crate::i18n::Key as L;
-use crate::import_job::spawn_import;
 
 /// Despacha os modais abertos (chamado uma vez por frame).
 pub fn dialogs(ui: &mut egui::Ui, app: &mut TerraApp) {
@@ -18,6 +17,10 @@ pub fn dialogs(ui: &mut egui::Ui, app: &mut TerraApp) {
     }
     if app.show_import {
         import_dialog(&ctx, app);
+    }
+    // v0.2.1: navegador de arquivos embutido.
+    if app.browser.open {
+        crate::file_browser::file_browser_dialog(&ctx, app);
     }
     if app.show_projects {
         projects_dialog(&ctx, app);
@@ -43,6 +46,9 @@ pub fn dialogs(ui: &mut egui::Ui, app: &mut TerraApp) {
             }
         });
     }
+    // v0.2: bem-vindo, wizard, ferramentas, gerência de projeto,
+    // processamento, export etc. (módulo próprio para conter o escopo).
+    crate::work_dialogs::work_dialogs(ui, app);
 }
 
 fn connect_dialog(ctx: &egui::Context, app: &mut TerraApp) {
@@ -114,24 +120,32 @@ fn import_dialog(ctx: &egui::Context, app: &mut TerraApp) {
                 ui.add(egui::TextEdit::singleline(&mut app.import_srid));
                 ui.end_row();
             });
+        // v0.2.1: fila do drag & drop multi-arquivo (hint informativo).
+        if !app.import_queue.is_empty() {
+            ui.weak(
+                app.t(L::FileBrowserQueueHint)
+                    .replace("{}", &app.import_queue.len().to_string()),
+            );
+        }
         ui.horizontal(|ui| {
             if ui.button(app.t(L::ImportDialogStart)).clicked() {
                 let path = app.import_path.trim().to_owned();
-                let srid = app.import_srid.trim().parse::<u32>().ok();
                 if path.is_empty() {
                     app.error = Some(app.t(L::ImportDialogPathHint).to_owned());
                 } else {
-                    app.import_job = Some(spawn_import(
-                        std::path::PathBuf::from(path),
-                        srid,
-                        app.t(L::ImportStageReading).to_owned(),
-                        app.t(L::ImportStageNormalizing).to_owned(),
-                    ));
-                    app.show_import = false;
+                    // v0.2.1: fluxo único consolidado (valida + sobe thread).
+                    app.start_import_from_path(path);
                 }
             }
-            if ui.button(app.t(L::DbDialogCancel)).clicked() {
+            // v0.2.1: toggle "usar navegador embutido" a partir do diálogo.
+            if ui.button(app.t(L::FileBrowserUseEmbedded)).clicked() {
+                let seed = app.browser.cwd.clone();
                 app.show_import = false;
+                app.browser.open_at(seed);
+            }
+            if ui.button(app.t(L::DbDialogCancel)).clicked() {
+                // Cancelar descarta a fila do drop multi-arquivo.
+                app.cancel_import_dialog();
             }
         });
     });

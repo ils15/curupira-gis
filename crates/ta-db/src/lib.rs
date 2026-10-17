@@ -4,11 +4,14 @@
 //! - [`repo`]: traits de repositório async — um só contrato para PostGIS
 //!   (padrão) e GPKG offline (feature `offline-gpkg`, opt-in).
 //! - [`spatial`]: utilitários espaciais do banco (DDL, COPY BINARY, MVT).
+//! - [`ops`]: processamento espacial server-side (buffer/interseção/união —
+//!   camadas derivadas, v0.2 GUI).
 //!
 //! Banco primário: **PostgreSQL 16 + PostGIS 3.4**, SRID do projeto **4674**
 //! (coluna `geometry(Geometry,4674)` + índice GIST + CHECK de SRID — Fase 1).
 
 pub mod error;
+pub mod ops;
 pub mod pool;
 pub mod repo;
 pub mod spatial;
