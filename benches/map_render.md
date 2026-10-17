@@ -105,6 +105,19 @@ O que precisa de olhos humanos em máquina com display:
 - [ ] workbench.json: `recent_files` (máx. 15) e `recent_dirs` (máx. 8) persistem entre sessões; workbench antigo SEM essas chaves abre normal (defaults serde).
 - [ ] Windows: navegador idêntico (é 100% egui); breadcrumb mostra `C:\`; til `~` não expande sem HOME (comportamento documentado).
 
+### v0.2.2 — paleta de comandos + caixa de ferramentas (novo)
+
+- [ ] **Ctrl+K em qualquer foco** abre a paleta; digitar "buf" mostra Buffer (Processamento) primeiro; ↑/↓ movem a seleção com realce visível, Enter executa, Esc e clique no backdrop fecham.
+- [ ] Paleta casa em pt-BR e en: "imp" acha "Importar…" em pt-BR, "exp" acha "Export…" em en (trocar idioma no menu e repetir).
+- [ ] Ações desabilitadas aparecem esmaecidas com motivo no hover: sem banco, Buffer/Console SQL/Desconect mostram "Conecte-se a um banco de dados"; undo sem edições mostra "Nada a desfazer".
+- [ ] Cada linha da paleta mostra categoria à direita e atalho quando existe (Ctrl+O/Ctrl+I/Esc); "Paleta de comandos… (Ctrl+K)" aparece no menu Área de Trabalho.
+- [ ] Persona filtra a paleta: como Administrador, "import" não traz o comando de importar; como Operador, nada de Gerência de Projeto/Administração.
+- [ ] Área de Trabalho → "Caixa de ferramentas" abre a janela flutuante; ela é movível/redimensionável e convive com o canvas (não é modal).
+- [ ] Na caixa: busca filtra o catálogo (3 ops PostGIS + Importar + Exportar); Buffer esmaecido sem banco+projeto com motivo no hover; clicar Buffer com banco+projeto abre o diálogo pré-preenchido (`{camada}_buffer`).
+- [ ] Toolbars: 📂 mostra "Abrir projeto (Ctrl+O)" e 📥 "Importar camada (Ctrl+I)" no tooltip; ✛/📍/⌗/▭ têm o MESMO visual de hover/ativo (todos `toggle_value`) e o ativo fica realçado.
+- [ ] Com projeto aberto, a barra de título mostra "Curupira GIS — {nome do projeto}"; fechando a conexão, volta a "Curupira GIS".
+- [ ] Toda ação do menu/toolbar continua funcionando igual após a refactor do registro (regressão: importar, exportar, zoom, overlays, undo/redo, personas, tema, idioma).
+
 ### Legado (Fase 3 — manter verde)
 
 - [ ] `cargo run -p ta-gui` abre janela 1280×800; dark/light alternam no menu Área de Trabalho → Tema (contraste AA nos dois).

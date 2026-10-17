@@ -433,3 +433,162 @@ fn v021_recentes_persistem_no_workbench_json() {
     assert_eq!(reloaded.recent_dirs[0].path, "/d");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// v0.2.2 — registro de comandos: paleta (Ctrl+K) + caixa de ferramentas
+// ---------------------------------------------------------------------------
+
+/// Frame com eventos de teclado reais (atalhos exercitados de verdade).
+/// `modifiers` entra como evento próprio — igual ao winit (`ModifiersChanged`
+/// precede o `Key`); sem isso `input.modifiers` não fica `ctrl`.
+fn frame_with_events(app: &mut TerraApp, events: Vec<egui::Event>) -> usize {
+    let ctx = egui::Context::default();
+    let raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 800.0),
+        )),
+        events,
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(raw, |ui| app.show(ui));
+    let shapes = std::mem::take(&mut out.shapes);
+    out.drop_without_applying_deltas();
+    shapes.len()
+}
+
+fn ctrl_key_ev(key: egui::Key) -> Vec<egui::Event> {
+    vec![
+        egui::Event::ModifiersChanged(egui::Modifiers::CTRL),
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        },
+    ]
+}
+
+#[test]
+fn v022_palette_abre_via_ctrl_k_executa_e_fecha() {
+    let mut app = test_app();
+
+    // Ctrl+K REAL (evento de teclado no ctx headless) abre a paleta.
+    frame_with_events(&mut app, ctrl_key_ev(egui::Key::K));
+    assert!(app.dlg.palette, "Ctrl+K deve abrir a paleta");
+    assert!(frame(&mut app) > 0, "paleta aberta renderiza headless");
+
+    // Ctrl+K de novo alterna (fecha).
+    frame_with_events(&mut app, ctrl_key_ev(egui::Key::K));
+    assert!(!app.dlg.palette);
+
+    // Menu Área de Trabalho e atalho compartilham o MESMO comando (registro).
+    app.dlg.palette = false;
+    let ctx = egui::Context::default();
+    assert!(ta_gui::command_registry::run(
+        &mut app,
+        &ctx,
+        "workspace.palette"
+    ));
+    assert!(app.dlg.palette);
+    assert!(frame(&mut app) > 0);
+
+    // Comando do registro mexe no estado de verdade: zoom-in muda a viewport.
+    app.dlg.palette = false;
+    let before = app.map.viewport().px_per_unit();
+    assert!(ta_gui::command_registry::run(&mut app, &ctx, "map.zoom_in"));
+    let after = app.map.viewport().px_per_unit();
+    assert!(after > before, "zoom_in do registro deve aproximar");
+}
+
+#[test]
+fn v022_todos_os_comandos_renderizam_e_rodando_headless_sem_panic() {
+    let mut app = test_app();
+    app.workbench_path = None; // não polui config do host
+    let ctx = egui::Context::default();
+    // Executa cada comando e pinta um frame com o estado resultante
+    // (diálogos abertos, personas trocadas, toggles ligados…).
+    for cmd in ta_gui::command_registry::all() {
+        (cmd.run)(&mut app, &ctx);
+        assert!(frame(&mut app) > 0, "frame após {}", cmd.id);
+    }
+    // Estado resultante sanity: paleta/caixa terminam abertas (últimos
+    // comandos executados incluem workspace.palette/toolbox).
+    app.dlg.palette = false;
+    app.dlg.toolbox = false;
+    assert!(frame(&mut app) > 0);
+}
+
+#[test]
+fn v022_toolbox_abre_busca_e_aponta_para_o_dialogo_de_parametros() {
+    let mut app = test_app();
+    // Abre via comando do registro (menu Área de Trabalho usa o mesmo).
+    let ctx = egui::Context::default();
+    assert!(ta_gui::command_registry::run(
+        &mut app,
+        &ctx,
+        "workspace.toolbox"
+    ));
+    assert!(app.dlg.toolbox);
+    assert!(
+        frame(&mut app) > 0,
+        "janela da caixa de ferramentas renderiza"
+    );
+
+    // Busca do catálogo: "buf" encontra Buffer; clicar (run do comando)
+    // abre o diálogo de processamento pré-preenchido existente.
+    let tools = ta_gui::toolbox::search_tools(&app, "buf");
+    assert_eq!(tools[0].id, "tool.buffer");
+    assert!(ta_gui::command_registry::run(
+        &mut app,
+        &ctx,
+        tools[0].command
+    ));
+    assert_eq!(app.dlg.processing, Some(ta_gui::app::ProcKind::Buffer));
+    assert!(
+        app.dlg.proc_target.ends_with("_buffer"),
+        "diálogo pré-preenchido: {}",
+        app.dlg.proc_target
+    );
+    assert!(frame(&mut app) > 0);
+    app.dlg.processing = None;
+
+    // Import/Export também são ferramentas da caixa (mesmos comandos do
+    // menu Arquivo).
+    let all = ta_gui::toolbox::search_tools(&app, "");
+    assert_eq!(all.len(), 5, "3 ops PostGIS + import + export");
+    assert!(all.iter().any(|t| t.command == "file.import"));
+    assert!(all.iter().any(|t| t.command == "file.export_layer"));
+    app.dlg.toolbox = false;
+}
+
+#[test]
+fn v022_titulo_da_janela_reflete_projeto_aberto() {
+    let mut app = test_app();
+    let _ = frame(&mut app);
+    // Sem projeto: título = nome do app.
+    let sem_projeto = app.last_title.clone().unwrap();
+    assert_eq!(
+        sem_projeto,
+        ta_gui::i18n::tr(ta_gui::i18n::Lang::PtBr, ta_gui::i18n::Key::AppTitle)
+    );
+
+    // Projeto aberto → título "Curupira GIS — {nome}" (dados dinâmicos via
+    // format!, rótulo via i18n).
+    app.state.project = Some(ta_core::project::Project {
+        id: "p1".into(),
+        name: "monitoramento-2026".into(),
+        ..Default::default()
+    });
+    let _ = frame(&mut app);
+    let com_projeto = app.last_title.clone().unwrap();
+    assert!(
+        com_projeto.contains("monitoramento-2026"),
+        "título com projeto: {com_projeto}"
+    );
+    assert!(
+        com_projeto.starts_with(&sem_projeto),
+        "título = AppTitle — projeto: {com_projeto}"
+    );
+}

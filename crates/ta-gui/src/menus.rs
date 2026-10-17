@@ -6,17 +6,21 @@
 //!   renderizados (ver [`crate::persona`]); Área de Trabalho, Mapa, Ajuda e
 //!   Arquivo (mínimo) ficam sempre — sem elas o usuário perdia a saída ou a
 //!   troca de persona.
-//! - **Ações reais**: todo item chama a mesma ação do painel equivalente —
-//!   nada decorativo.
-//! - 100% dos rótulos via i18n; atalhos de teclado continuam no
+//! - **Ações reais, fonte única**: menus e toolbars **não implementam
+//!   comportamento** — consomem o registro de comandos
+//!   ([`crate::command_registry`], padrão RustGIS "toda ação é um comando").
+//!   Guardas de habilitação (com motivo no tooltip) e atalhos exibidos vêm
+//!   do mesmo lugar que a paleta Ctrl+K e a caixa de ferramentas.
+//! - 100% dos rótulos via i18n; disparo real de atalhos continua no
 //!   [`crate::app::TerraApp::handle_shortcuts`].
 
 use eframe::egui;
-use egui::{Align, Layout, ThemePreference};
+use egui::{Align, Layout};
 
 use crate::app::TerraApp;
 use crate::app_state::EditMode;
-use crate::db_worker::DbCmd;
+use crate::command_registry as reg;
+use crate::command_registry::Command;
 use crate::i18n::Key as L;
 use crate::persona::Persona;
 
@@ -50,43 +54,65 @@ pub fn menu_bar(ui: &mut egui::Ui, app: &mut TerraApp) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Renderização a partir do registro — menus não sabem COMO executar nada.
+// ---------------------------------------------------------------------------
+
+/// Renderiza os comandos de uma categoria (ordem do registro).
+fn menu_commands(ui: &mut egui::Ui, app: &mut TerraApp, cat: reg::Category) {
+    menu_commands_if(ui, app, |c| c.category == cat);
+}
+
+/// Variante com predicado (menu Arquivo divide em torno de "Abrir recente";
+/// Área de Trabalho renderiza persona/tema/idioma como submenus).
+fn menu_commands_if(ui: &mut egui::Ui, app: &mut TerraApp, keep: impl Fn(&Command) -> bool) {
+    for cmd in reg::all().iter().filter(|c| keep(c)) {
+        if !cmd.is_visible(app) {
+            continue;
+        }
+        if cmd.sep {
+            ui.separator();
+        }
+        let label = app.t(cmd.label);
+        match cmd.toggle {
+            // Comando-marca (grade, barra de escala, modos): checkbox com
+            // estado real; o run alterna.
+            Some(is_on) => {
+                let mut on = is_on(app);
+                if ui.checkbox(&mut on, label).changed() {
+                    (cmd.run)(app, ui.ctx());
+                }
+            }
+            None => {
+                let mut resp = ui.add_enabled(cmd.enabled(app), egui::Button::new(label));
+                // Motivo da desabilitação no hover (a11y — não é só cinza).
+                if let Some(reason) = cmd.reason(app) {
+                    resp = resp.on_disabled_hover_text(app.t(reason));
+                }
+                if resp.clicked() {
+                    (cmd.run)(app, ui.ctx());
+                    ui.close();
+                }
+            }
+        }
+    }
+}
+
 fn file_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
     ui.menu_button(app.t(L::MenuFile), |ui| {
-        if app.state.flags.project_mgmt && ui.button(app.t(L::NewProject)).clicked() {
-            app.dlg.new_project_name.clear();
-            app.dlg.create_project = true;
-            ui.close();
-        }
-        if ui.button(app.t(L::OpenProject)).clicked() {
-            app.request_open_project();
-            ui.close();
-        }
+        menu_commands_if(ui, app, |c| {
+            c.category == reg::Category::File && c.id != "file.quit"
+        });
         if app.state.flags.import_export {
-            if ui.button(app.t(L::Import)).clicked() {
-                app.show_import = true;
-                ui.close();
-            }
-            // v0.2.1: navegador embutido (Ctrl+Shift+O).
-            if ui.button(app.t(L::FileBrowserUseEmbedded)).clicked() {
-                let seed = app.browser.cwd.clone();
-                app.browser.open_at(seed);
-                ui.close();
-            }
-            if ui.button(app.t(L::ExportActiveLayer)).clicked() {
-                app.dlg.export = true;
-                ui.close();
-            }
             open_recent_menu(ui, app);
         }
-        ui.separator();
-        if ui.button(app.t(L::Quit)).clicked() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-        }
+        menu_commands_if(ui, app, |c| c.id == "file.quit");
     });
 }
 
 /// "Abrir recente ▸": lista clicável; entrada que sumiu do disco é removida
-/// na hora (on-click) — v0.2.1.
+/// na hora (on-click) — v0.2.1. (Submenu bespoke: itens dinâmicos do disco;
+/// a ação de importar continua a única do app.)
 fn open_recent_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
     ui.menu_button(app.t(L::FileBrowserOpenRecent), |ui| {
         let recents = app.workbench.recent_files.clone();
@@ -120,71 +146,68 @@ fn open_recent_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
 
 fn edit_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
     ui.menu_button(app.t(L::MenuEdit), |ui| {
-        let can_undo = !app.state.undo_stack.is_empty();
-        if ui
-            .add_enabled(can_undo, egui::Button::new(app.t(L::Undo)))
-            .clicked()
-        {
-            app.state.undo();
-            app.state.sync_map(&mut app.map);
-            ui.close();
-        }
-        let can_redo = !app.state.redo_stack.is_empty();
-        if ui
-            .add_enabled(can_redo, egui::Button::new(app.t(L::Redo)))
-            .clicked()
-        {
-            app.state.redo();
-            app.state.sync_map(&mut app.map);
-            ui.close();
-        }
-        ui.separator();
-        let has_sel = app.state.selection.is_some();
-        if ui
-            .add_enabled(has_sel, egui::Button::new(app.t(L::DeleteFeatureTitle)))
-            .clicked()
-        {
-            app.confirm_delete = true;
-            ui.close();
-        }
+        menu_commands(ui, app, reg::Category::Edit);
     });
 }
 
 fn workspace_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
     ui.menu_button(app.t(L::MenuWorkspace), |ui| {
-        // Personas (marcador na corrente; trocar aplica o preset + persiste).
-        for (persona, key) in [
-            (Persona::Sig, L::PersonaSig),
-            (Persona::Assistant, L::PersonaAssistant),
-            (Persona::Operator, L::PersonaOperator),
-            (Persona::Administrator, L::PersonaAdmin),
+        // v0.2.2: paleta + caixa de ferramentas + reabrir bem-vindo (o resto
+        // da categoria — persona/tema/idioma — vira submenu com marcador).
+        menu_commands_if(ui, app, |c| {
+            c.category == reg::Category::Workspace
+                && !c.id.contains("persona.")
+                && !c.id.contains("theme.")
+                && !c.id.contains("lang.")
+        });
+        ui.separator();
+        // Personas (marcador na corrente; ação única = comando do registro).
+        for (persona, key, id) in [
+            (Persona::Sig, L::PersonaSig, "workspace.persona.sig"),
+            (
+                Persona::Assistant,
+                L::PersonaAssistant,
+                "workspace.persona.assistant",
+            ),
+            (
+                Persona::Operator,
+                L::PersonaOperator,
+                "workspace.persona.operator",
+            ),
+            (
+                Persona::Administrator,
+                L::PersonaAdmin,
+                "workspace.persona.administrator",
+            ),
         ] {
             let current = app.state.persona == persona;
             if ui.selectable_label(current, app.t(key)).clicked() {
-                app.apply_persona(persona);
+                reg::run(app, ui.ctx(), id);
                 ui.close();
             }
         }
         ui.separator();
-        if ui.button(app.t(L::ReopenWelcome)).clicked() {
-            app.dlg.welcome = true;
-            app.dlg.welcome_show_at_start = app.workbench.show_welcome;
-            ui.close();
-        }
-        ui.separator();
+        // Tema (ação única = comando do registro).
         ui.menu_button(app.t(L::Theme), |ui| {
-            if ui.button(app.t(L::ThemeDark)).clicked() {
-                ui.ctx().set_theme(ThemePreference::Dark);
-            }
-            if ui.button(app.t(L::ThemeLight)).clicked() {
-                ui.ctx().set_theme(ThemePreference::Light);
+            for (key, id) in [
+                (L::ThemeDark, "workspace.theme.dark"),
+                (L::ThemeLight, "workspace.theme.light"),
+            ] {
+                if ui.button(app.t(key)).clicked() {
+                    reg::run(app, ui.ctx(), id);
+                    ui.close();
+                }
             }
         });
+        // Idioma (marcador na corrente; ação única = comando do registro).
         ui.menu_button(app.t(L::Language), |ui| {
-            for lang in [crate::i18n::Lang::PtBr, crate::i18n::Lang::En] {
+            for (lang, id) in [
+                (crate::i18n::Lang::PtBr, "workspace.lang.pt_br"),
+                (crate::i18n::Lang::En, "workspace.lang.en"),
+            ] {
                 let current = app.state.i18n.lang == lang;
                 if ui.selectable_label(current, lang.display_name()).clicked() {
-                    app.set_language(lang);
+                    reg::run(app, ui.ctx(), id);
                     ui.close();
                 }
             }
@@ -194,158 +217,38 @@ fn workspace_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
 
 fn map_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
     ui.menu_button(app.t(L::MenuMap), |ui| {
-        if ui.button(app.t(L::ZoomIn)).clicked() {
-            app.map.zoom_step(1.25);
-            ui.close();
-        }
-        if ui.button(app.t(L::ZoomOut)).clicked() {
-            app.map.zoom_step(0.8);
-            ui.close();
-        }
-        if ui.button(app.t(L::ZoomToExtent)).clicked() {
-            app.zoom_to_extent();
-            ui.close();
-        }
-        ui.separator();
-        // Overlays: toggles persistentes na sessão (estado em AppState).
-        let mut grid = app.state.grid_on;
-        if ui.checkbox(&mut grid, app.t(L::Grid)).changed() {
-            app.state.grid_on = grid;
-        }
-        let mut bar = app.state.scale_bar_on;
-        if ui.checkbox(&mut bar, app.t(L::ScaleBar)).changed() {
-            app.state.scale_bar_on = bar;
-        }
+        menu_commands(ui, app, reg::Category::Map);
     });
 }
 
 fn tools_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
     ui.menu_button(app.t(L::MenuTools), |ui| {
-        if ui.button(app.t(L::ConnectDb)).clicked() {
-            app.show_connect = true;
-            ui.close();
-        }
-        let connected = app.state.conn.is_db();
-        if ui
-            .add_enabled(connected, egui::Button::new(app.t(L::DisconnectDb)))
-            .clicked()
-        {
-            app.state.conn.send(DbCmd::Disconnect);
-            ui.close();
-        }
-        ui.separator();
-        if ui
-            .add_enabled(connected, egui::Button::new(app.t(L::SqlConsole)))
-            .clicked()
-        {
-            app.dlg.sql = true;
-            ui.close();
-        }
-        if ui.button(app.t(L::Options)).clicked() {
-            app.dlg.options = true;
-            ui.close();
-        }
+        menu_commands(ui, app, reg::Category::Tools);
     });
 }
 
 fn project_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
     ui.menu_button(app.t(L::MenuProjectMgmt), |ui| {
-        if ui.button(app.t(L::CreateProject)).clicked() {
-            app.dlg.new_project_name.clear();
-            app.dlg.create_project = true;
-            ui.close();
-        }
-        let has_project = app.state.project.is_some() && app.state.conn.is_db();
-        if ui
-            .add_enabled(has_project, egui::Button::new(app.t(L::RenameProject)))
-            .clicked()
-        {
-            app.dlg.rename_project_name = app
-                .state
-                .project
-                .as_ref()
-                .map(|p| p.name.clone())
-                .unwrap_or_default();
-            app.dlg.rename_project = true;
-            ui.close();
-        }
-        if ui
-            .add_enabled(has_project, egui::Button::new(app.t(L::DeleteProject)))
-            .clicked()
-        {
-            app.dlg.delete_project = true;
-            ui.close();
-        }
-        ui.separator();
-        let has_active = app.state.active_or_first().is_some();
-        let rename_ok = has_active
-            && app
-                .state
-                .active_or_first()
-                .is_some_and(|i| !app.state.layers[i].layer.id.is_empty())
-            && app.state.conn.is_db();
-        if ui
-            .add_enabled(rename_ok, egui::Button::new(app.t(L::RenameLayer)))
-            .clicked()
-        {
-            app.open_rename_layer();
-            ui.close();
-        }
-        if ui
-            .add_enabled(has_active, egui::Button::new(app.t(L::LayerRemove)))
-            .clicked()
-        {
-            app.remove_active_layer();
-            ui.close();
-        }
+        menu_commands(ui, app, reg::Category::Project);
     });
 }
 
 fn admin_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
     ui.menu_button(app.t(L::MenuAdmin), |ui| {
-        let connected = app.state.conn.is_db();
-        if ui
-            .add_enabled(connected, egui::Button::new(app.t(L::RunMigrations)))
-            .clicked()
-        {
-            app.state.conn.send(DbCmd::RunMigrations);
-            ui.close();
-        }
-        if ui
-            .add_enabled(connected, egui::Button::new(app.t(L::DbInfo)))
-            .clicked()
-        {
-            app.state.conn.send(DbCmd::DbInfo);
-            ui.close();
-        }
+        menu_commands(ui, app, reg::Category::Admin);
     });
 }
 
 fn plugins_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
     ui.menu_button(app.t(L::MenuPlugins), |ui| {
-        if ui.button(app.t(L::PluginsTitle)).clicked() {
-            app.dlg.plugins = true;
-            ui.close();
-        }
+        menu_commands(ui, app, reg::Category::Plugins);
     });
 }
 
 fn processing_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
     ui.menu_button(app.t(L::MenuProcessing), |ui| {
+        menu_commands(ui, app, reg::Category::Processing);
         let ready = app.state.conn.is_db() && app.state.project.is_some();
-        for (kind, key) in [
-            (crate::app::ProcKind::Buffer, L::ProcBuffer),
-            (crate::app::ProcKind::Intersect, L::ProcIntersect),
-            (crate::app::ProcKind::Union, L::ProcUnion),
-        ] {
-            if ui
-                .add_enabled(ready, egui::Button::new(app.t(key)))
-                .clicked()
-            {
-                app.open_processing(kind);
-                ui.close();
-            }
-        }
         if !ready {
             ui.weak(app.t(L::ProcNeedsDb));
         }
@@ -354,20 +257,14 @@ fn processing_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
 
 fn help_menu(ui: &mut egui::Ui, app: &mut TerraApp) {
     ui.menu_button(app.t(L::MenuHelp), |ui| {
-        if ui.button(app.t(L::Shortcuts)).clicked() {
-            app.dlg.shortcuts = true;
-            ui.close();
-        }
-        if ui.button(app.t(L::About)).clicked() {
-            app.show_about = true;
-            ui.close();
-        }
+        menu_commands(ui, app, reg::Category::Help);
     });
 }
 
 // ---------------------------------------------------------------------------
 // Toolbars — duas linhas densas com grupos separados (paridade visual).
-// Botões pequenos com glifos unicode + tooltip i18n (a11y: nada só de cor).
+// Botões pequenos com glifos unicode + tooltip i18n (com atalho quando
+// existente); toggles com estado hover/ativo consistentes (v0.2.2).
 // ---------------------------------------------------------------------------
 
 /// Painel de toolbars (uma única TopPanel com duas linhas).
@@ -383,162 +280,78 @@ pub fn toolbars(ui: &mut egui::Ui, app: &mut TerraApp) {
     });
 }
 
-fn toolbar_file_row(ui: &mut egui::Ui, app: &mut TerraApp) {
-    if app.state.flags.project_mgmt
-        && ui
-            .small_button("🗎")
-            .on_hover_text(app.t(L::NewProject))
-            .clicked()
-    {
-        app.dlg.new_project_name.clear();
-        app.dlg.create_project = true;
+/// Botão de toolbar acionando um comando do registro: visibilidade por
+/// persona, guarda (desabilitado **com motivo** no hover) e tooltip i18n.
+fn reg_toolbar(ui: &mut egui::Ui, app: &mut TerraApp, id: &str, glyph: &str, tip: L) {
+    let Some(cmd) = reg::find(id) else {
+        return;
+    };
+    if !cmd.is_visible(app) {
+        return;
     }
+    let mut resp = ui.add_enabled(cmd.enabled(app), egui::Button::new(glyph).small());
+    if let Some(reason) = cmd.reason(app) {
+        resp = resp.on_disabled_hover_text(app.t(reason));
+    }
+    if resp.on_hover_text(app.t(tip)).clicked() {
+        (cmd.run)(app, ui.ctx());
+    }
+}
+
+/// Toggle de toolbar (grade, barra, modos) com visual único: `toggle_value`
+/// dá o mesmo estado hover/ativo para todos — v0.2.2 (antes era misto de
+/// toggle/selectable). O run alterna o estado; o visual lê do registro.
+fn reg_toolbar_toggle(ui: &mut egui::Ui, app: &mut TerraApp, id: &str, glyph: &str, tip: L) {
+    let Some(cmd) = reg::find(id) else {
+        return;
+    };
+    if !cmd.is_visible(app) {
+        return;
+    }
+    let mut visual = cmd.toggle.map(|f| f(app)).unwrap_or(false);
     if ui
-        .small_button("📂")
-        .on_hover_text(app.t(L::OpenProject))
+        .toggle_value(&mut visual, glyph)
+        .on_hover_text(app.t(tip))
         .clicked()
     {
-        app.request_open_project();
+        (cmd.run)(app, ui.ctx());
     }
+}
+
+fn toolbar_file_row(ui: &mut egui::Ui, app: &mut TerraApp) {
+    reg_toolbar(ui, app, "file.new_project", "🗎", L::NewProject);
+    reg_toolbar(ui, app, "file.open_project", "📂", L::HintOpenProject);
     if app.state.flags.import_export {
         ui.separator();
-        if ui
-            .small_button("📥")
-            .on_hover_text(app.t(L::Import))
-            .clicked()
-        {
-            app.show_import = true;
-        }
-        // v0.2.1: navegador de arquivos embutido na toolbar.
-        if ui
-            .small_button("🗂")
-            .on_hover_text(app.t(L::FileBrowserUseEmbedded))
-            .clicked()
-        {
-            let seed = app.browser.cwd.clone();
-            app.browser.open_at(seed);
-        }
-        if ui
-            .small_button("📤")
-            .on_hover_text(app.t(L::ExportActiveLayer))
-            .clicked()
-        {
-            app.dlg.export = true;
-        }
+        reg_toolbar(ui, app, "file.import", "📥", L::HintImport);
+        reg_toolbar(ui, app, "file.browser", "🗂", L::FileBrowserUseEmbedded);
+        reg_toolbar(ui, app, "file.export_layer", "📤", L::ExportActiveLayer);
     }
     if app.state.flags.tools {
         ui.separator();
-        if ui
-            .small_button("🔌")
-            .on_hover_text(app.t(L::ConnectDb))
-            .clicked()
-        {
-            app.show_connect = true;
-        }
-        if ui
-            .add_enabled(app.state.conn.is_db(), egui::Button::new("⏏").small())
-            .on_hover_text(app.t(L::DisconnectDb))
-            .clicked()
-        {
-            app.state.conn.send(DbCmd::Disconnect);
-        }
+        reg_toolbar(ui, app, "tools.connect_db", "🔌", L::ConnectDb);
+        reg_toolbar(ui, app, "tools.disconnect_db", "⏏", L::DisconnectDb);
     }
 }
 
 fn toolbar_map_row(ui: &mut egui::Ui, app: &mut TerraApp) {
     // Zoom
-    if ui
-        .small_button("＋")
-        .on_hover_text(app.t(L::ZoomIn))
-        .clicked()
-    {
-        app.map.zoom_step(1.25);
-    }
-    if ui
-        .small_button("－")
-        .on_hover_text(app.t(L::ZoomOut))
-        .clicked()
-    {
-        app.map.zoom_step(0.8);
-    }
-    if ui
-        .small_button("⤢")
-        .on_hover_text(app.t(L::ZoomToExtent))
-        .clicked()
-    {
-        app.zoom_to_extent();
-    }
-    // Overlays
+    reg_toolbar(ui, app, "map.zoom_in", "＋", L::ZoomIn);
+    reg_toolbar(ui, app, "map.zoom_out", "－", L::ZoomOut);
+    reg_toolbar(ui, app, "map.zoom_to_extent", "⤢", L::ZoomToExtent);
+    // Overlays (toggles consistentes com os modos do mouse)
     ui.separator();
-    let mut grid = app.state.grid_on;
-    if ui
-        .toggle_value(&mut grid, "⌗")
-        .on_hover_text(app.t(L::Grid))
-        .changed()
-    {
-        app.state.grid_on = grid;
-    }
-    let mut bar = app.state.scale_bar_on;
-    if ui
-        .toggle_value(&mut bar, "▭")
-        .on_hover_text(app.t(L::ScaleBar))
-        .changed()
-    {
-        app.state.scale_bar_on = bar;
-    }
+    reg_toolbar_toggle(ui, app, "map.toggle_grid", "⌗", L::Grid);
+    reg_toolbar_toggle(ui, app, "map.toggle_scale_bar", "▭", L::ScaleBar);
     // Modos do mouse (persona com edição apenas).
     if app.state.flags.editing {
         ui.separator();
-        let identify = app.state.edit_mode == EditMode::Navigate;
-        if ui
-            .selectable_label(identify, "✛")
-            .on_hover_text(app.t(L::RailIdentify))
-            .clicked()
-        {
-            app.state.edit_mode = EditMode::Navigate;
-        }
-        let new_point = app.state.edit_mode == EditMode::NewPoint;
-        if ui
-            .selectable_label(new_point, "📍")
-            .on_hover_text(app.t(L::RailNewPoint))
-            .clicked()
-        {
-            app.state.edit_mode = if new_point {
-                EditMode::Navigate
-            } else {
-                EditMode::NewPoint
-            };
-        }
-    }
-    // Undo/redo de atributos (persona com edição).
-    if app.state.flags.editing {
+        reg_toolbar_toggle(ui, app, "map.mode_navigate", "✛", L::RailIdentify);
+        reg_toolbar_toggle(ui, app, "map.mode_new_point", "📍", L::RailNewPoint);
         ui.separator();
-        let can_undo = !app.state.undo_stack.is_empty();
-        if ui
-            .add_enabled(can_undo, egui::Button::new("↶").small())
-            .on_hover_text(app.t(L::Undo))
-            .clicked()
-        {
-            app.state.undo();
-            app.state.sync_map(&mut app.map);
-        }
-        let can_redo = !app.state.redo_stack.is_empty();
-        if ui
-            .add_enabled(can_redo, egui::Button::new("↷").small())
-            .on_hover_text(app.t(L::Redo))
-            .clicked()
-        {
-            app.state.redo();
-            app.state.sync_map(&mut app.map);
-        }
-        let has_sel = app.state.selection.is_some();
-        if ui
-            .add_enabled(has_sel, egui::Button::new("🗑").small())
-            .on_hover_text(app.t(L::DeleteFeatureTitle))
-            .clicked()
-        {
-            app.confirm_delete = true;
-        }
+        reg_toolbar(ui, app, "edit.undo", "↶", L::Undo);
+        reg_toolbar(ui, app, "edit.redo", "↷", L::Redo);
+        reg_toolbar(ui, app, "edit.delete_feature", "🗑", L::DeleteFeatureTitle);
     }
     // Dica do modo ativo à direita (mesma linha, sem painel extra).
     if app.state.edit_mode == EditMode::NewPoint {

@@ -78,6 +78,17 @@ pub struct UiDialogs {
     pub proc_source_b: Option<String>,
     pub proc_distance: String,
     pub proc_target: String,
+    // ---- v0.2.2 (registro de comandos) ---------------------------------
+    /// Paleta de comandos (Ctrl+K): aberta?
+    pub palette: bool,
+    /// Query corrente da paleta (busca fuzzy).
+    pub palette_query: String,
+    /// Índice selecionado na paleta (↑/↓/Enter).
+    pub palette_selected: usize,
+    /// Caixa de ferramentas de processamento (janela flutuante).
+    pub toolbox: bool,
+    /// Query corrente da busca da caixa de ferramentas.
+    pub toolbox_query: String,
 }
 
 /// Aplicação principal. Mantém o `MapView` (contrato migrável de backend).
@@ -128,6 +139,9 @@ pub struct TerraApp {
     /// Consome a fila automaticamente ao fim de cada import (ligado ao
     /// confirmar o import de um drop; desligado ao cancelar o diálogo).
     pub import_queue_auto: bool,
+    // ---- v0.2.2 (registro de comandos) -------------------------------
+    /// Último título de janela enviado (evita `ViewportCommand` por frame).
+    pub last_title: Option<String>,
 }
 
 /// Campos do formulário de conexão.
@@ -199,6 +213,7 @@ impl TerraApp {
             browser: crate::file_browser::BrowserState::default(),
             import_queue: Vec::new(),
             import_queue_auto: false,
+            last_title: None,
         }
     }
 
@@ -485,6 +500,11 @@ impl TerraApp {
             }
             if ctrl && i.key_pressed(Key::I) && self.state.flags.import_export {
                 self.show_import = true;
+            }
+            // v0.2.2: Ctrl+K alterna a paleta de comandos (funciona em
+            // qualquer foco — é navegação, não digitação de campo).
+            if ctrl && i.key_pressed(Key::K) {
+                self.dlg.palette = !self.dlg.palette;
             }
             if ctrl && i.key_pressed(Key::Z) && !editing {
                 self.state.undo();
@@ -975,6 +995,19 @@ impl TerraApp {
         }
     }
 
+    /// v0.2.2: título da janela com o projeto aberto ("Curupira GIS —
+    /// projeto"). Envia `ViewportCommand::Title` só quando muda.
+    fn update_window_title(&mut self, ctx: &egui::Context) {
+        let title = match &self.state.project {
+            Some(p) => format!("{} — {}", self.t(L::AppTitle), p.name),
+            None => self.t(L::AppTitle).to_owned(),
+        };
+        if self.last_title.as_deref() != Some(title.as_str()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.last_title = Some(title);
+        }
+    }
+
     // ------------------------------------------------------------------
     // Clique no mapa: pick ou novo ponto
     // ------------------------------------------------------------------
@@ -1057,6 +1090,8 @@ impl TerraApp {
         self.drain_band_loads();
         // v0.2.1: drag & drop de arquivos do SO direto no canvas.
         self.drain_drops(&ctx);
+        // v0.2.2: título da janela reflete o projeto aberto.
+        self.update_window_title(&ctx);
         // Banda carregando: repinta em ritmo baixo até o canal entregar
         // (sem isso a imagem só apareceria no próximo evento de input).
         if self.band_job.is_some() {

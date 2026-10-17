@@ -46,6 +46,13 @@ pub fn dialogs(ui: &mut egui::Ui, app: &mut TerraApp) {
             }
         });
     }
+    // v0.2.2: paleta de comandos (Ctrl+K) + caixa de ferramentas (janela).
+    if app.dlg.palette {
+        crate::palette::command_palette(&ctx, app);
+    }
+    if app.dlg.toolbox {
+        crate::toolbox::toolbox_window(&ctx, app);
+    }
     // v0.2: bem-vindo, wizard, ferramentas, gerência de projeto,
     // processamento, export etc. (módulo próprio para conter o escopo).
     crate::work_dialogs::work_dialogs(ui, app);

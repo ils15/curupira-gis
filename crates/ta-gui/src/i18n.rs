@@ -233,6 +233,30 @@ pub enum Key {
     FileBrowserUseEmbedded,
     FileBrowserQueueHint,
     FileBrowserNoDroppable,
+    // ---- v0.2.2 (registro de comandos: paleta + caixa de ferramentas) ----
+    MenuPalette,
+    PalettePlaceholder,
+    PaletteEmpty,
+    PaletteHint,
+    ToolboxTitle,
+    ToolboxSearchHint,
+    ToolboxEmpty,
+    ToolboxParams,
+    ProcBufferDesc,
+    ProcIntersectDesc,
+    ProcUnionDesc,
+    ImportToolDesc,
+    ExportToolDesc,
+    HintImport,
+    HintOpenProject,
+    DisabledNoDb,
+    DisabledNoProject,
+    DisabledNoSelection,
+    DisabledNoUndo,
+    DisabledNoRedo,
+    DisabledNoLayer,
+    LangPtBr,
+    LangEn,
 }
 
 /// Todas as chaves — o teste de completude itera esta lista.
@@ -428,6 +452,29 @@ pub const ALL_KEYS: &[Key] = &[
     Key::FileBrowserUseEmbedded,
     Key::FileBrowserQueueHint,
     Key::FileBrowserNoDroppable,
+    Key::MenuPalette,
+    Key::PalettePlaceholder,
+    Key::PaletteEmpty,
+    Key::PaletteHint,
+    Key::ToolboxTitle,
+    Key::ToolboxSearchHint,
+    Key::ToolboxEmpty,
+    Key::ToolboxParams,
+    Key::ProcBufferDesc,
+    Key::ProcIntersectDesc,
+    Key::ProcUnionDesc,
+    Key::ImportToolDesc,
+    Key::ExportToolDesc,
+    Key::HintImport,
+    Key::HintOpenProject,
+    Key::DisabledNoDb,
+    Key::DisabledNoProject,
+    Key::DisabledNoSelection,
+    Key::DisabledNoUndo,
+    Key::DisabledNoRedo,
+    Key::DisabledNoLayer,
+    Key::LangPtBr,
+    Key::LangEn,
 ];
 
 /// Tradução de `key` em `lang`. Exaustivo por construção.
@@ -666,6 +713,38 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         (Lang::PtBr, Key::FileBrowserNoDroppable) => {
             "Nenhum arquivo suportado no que foi solto (shp, geojson, gpkg, fgb, tif, csv)."
         }
+        // ---- v0.2.2 (registro de comandos: paleta + caixa de ferramentas) --
+        (Lang::PtBr, Key::MenuPalette) => "Paleta de comandos… (Ctrl+K)",
+        (Lang::PtBr, Key::PalettePlaceholder) => "Digite um comando…",
+        (Lang::PtBr, Key::PaletteEmpty) => "Nenhum comando encontrado.",
+        (Lang::PtBr, Key::PaletteHint) => "↑↓ navegar · Enter executar · Esc fechar",
+        (Lang::PtBr, Key::ToolboxTitle) => "Caixa de ferramentas",
+        (Lang::PtBr, Key::ToolboxSearchHint) => "Buscar ferramenta…",
+        (Lang::PtBr, Key::ToolboxEmpty) => "Nenhuma ferramenta encontrada.",
+        (Lang::PtBr, Key::ToolboxParams) => "Parâmetros",
+        (Lang::PtBr, Key::ProcBufferDesc) => {
+            "Área de influência em torno das feições da camada (PostGIS ST_Buffer)."
+        }
+        (Lang::PtBr, Key::ProcIntersectDesc) => {
+            "Interseção geométrica entre duas camadas (PostGIS ST_Intersection)."
+        }
+        (Lang::PtBr, Key::ProcUnionDesc) => {
+            "Dissolve/união das feições da camada (PostGIS ST_Union)."
+        }
+        (Lang::PtBr, Key::ImportToolDesc) => {
+            "Importa camada vetorial ou raster de arquivo para a sessão."
+        }
+        (Lang::PtBr, Key::ExportToolDesc) => "Exporta a camada ativa da sessão para GeoJSON.",
+        (Lang::PtBr, Key::HintImport) => "Importar camada (Ctrl+I)",
+        (Lang::PtBr, Key::HintOpenProject) => "Abrir projeto (Ctrl+O)",
+        (Lang::PtBr, Key::DisabledNoDb) => "Conecte-se a um banco de dados",
+        (Lang::PtBr, Key::DisabledNoProject) => "Abra (ou crie) um projeto",
+        (Lang::PtBr, Key::DisabledNoSelection) => "Nenhuma feição selecionada",
+        (Lang::PtBr, Key::DisabledNoUndo) => "Nada a desfazer",
+        (Lang::PtBr, Key::DisabledNoRedo) => "Nada a refazer",
+        (Lang::PtBr, Key::DisabledNoLayer) => "Nenhuma camada na sessão",
+        (Lang::PtBr, Key::LangPtBr) => "Idioma: Português (BR)",
+        (Lang::PtBr, Key::LangEn) => "Idioma: Inglês",
 
         (Lang::En, Key::AppTitle) => "Curupira GIS",
         (Lang::En, Key::AppSubtitle) => "Clean-room desktop GIS for Amazon forest monitoring",
@@ -887,6 +966,38 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         (Lang::En, Key::FileBrowserNoDroppable) => {
             "Nothing supported among the dropped files (shp, geojson, gpkg, fgb, tif, csv)."
         }
+        // ---- v0.2.2 (command registry: palette + toolbox) -------------------
+        (Lang::En, Key::MenuPalette) => "Command palette… (Ctrl+K)",
+        (Lang::En, Key::PalettePlaceholder) => "Type a command…",
+        (Lang::En, Key::PaletteEmpty) => "No command found.",
+        (Lang::En, Key::PaletteHint) => "↑↓ navigate · Enter run · Esc close",
+        (Lang::En, Key::ToolboxTitle) => "Processing toolbox",
+        (Lang::En, Key::ToolboxSearchHint) => "Search tools…",
+        (Lang::En, Key::ToolboxEmpty) => "No tool found.",
+        (Lang::En, Key::ToolboxParams) => "Parameters",
+        (Lang::En, Key::ProcBufferDesc) => {
+            "Buffer around the layer's features (PostGIS ST_Buffer)."
+        }
+        (Lang::En, Key::ProcIntersectDesc) => {
+            "Geometric intersection of two layers (PostGIS ST_Intersection)."
+        }
+        (Lang::En, Key::ProcUnionDesc) => {
+            "Dissolve/union of the layer's features (PostGIS ST_Union)."
+        }
+        (Lang::En, Key::ImportToolDesc) => {
+            "Imports a vector or raster layer from a file into the session."
+        }
+        (Lang::En, Key::ExportToolDesc) => "Exports the active layer of the session to GeoJSON.",
+        (Lang::En, Key::HintImport) => "Import layer (Ctrl+I)",
+        (Lang::En, Key::HintOpenProject) => "Open project (Ctrl+O)",
+        (Lang::En, Key::DisabledNoDb) => "Connect to a database",
+        (Lang::En, Key::DisabledNoProject) => "Open (or create) a project",
+        (Lang::En, Key::DisabledNoSelection) => "No feature selected",
+        (Lang::En, Key::DisabledNoUndo) => "Nothing to undo",
+        (Lang::En, Key::DisabledNoRedo) => "Nothing to redo",
+        (Lang::En, Key::DisabledNoLayer) => "No layer in the session",
+        (Lang::En, Key::LangPtBr) => "Language: Portuguese (BR)",
+        (Lang::En, Key::LangEn) => "Language: English",
     }
 }
 
@@ -936,7 +1047,7 @@ mod tests {
         // Guarda de completude: se alguém adicionar variante em Key e esquecer
         // de ALL_KEYS, os testes acima não a percorrem. Aqui forçamos uma
         // contagem esperada — atualize os dois juntos.
-        assert_eq!(ALL_KEYS.len(), 191, "Key e ALL_KEYS devem crescer juntos");
+        assert_eq!(ALL_KEYS.len(), 214, "Key e ALL_KEYS devem crescer juntos");
     }
 
     #[test]

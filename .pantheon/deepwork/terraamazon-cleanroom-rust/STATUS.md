@@ -889,3 +889,60 @@ O gate bloqueou v0.2 com 2 high em `crates/ta-db/src/ops.rs` (ambos provados no 
 2. **Ops não transacionais — camada derivada órfã**: `create_derived_layer` + `INSERT…SELECT` + limpeza não eram atômicos; erro SQL depois do registro deixava camada com 0 features (bypass do DELETE manual de limpeza). Todas as 3 ops (buffer/interseção/união) agora rodam em `pool.begin()`…`commit()` (`rollback` no erro/vazio — o DELETE manual deixou de existir); `PgLayerRepo` ganhou `add_on`/`update_bbox_on` (executor genérico) para compor a transação. Regressão no teste gated: erro SQL real (cast `$2::uuid` falhando após criar a camada) → erro E nenhuma camada órfã.
 
 Correção de documentação: "i18n.rs (+22 chaves)" acima era inconsistente com o total correto (**191**, 168 → 191 = **+23**, coberto pelo teste de contagem). Limitação do console SQL documentada em `db_worker.rs`: a guard `is_read_only_sql` é string-matching e `WITH … INSERT` em instrução única passa nela (bypass conhecido; mitigação real — transação `READ ONLY` — ficou para o backlog).
+
+---
+
+## Fase v0.2.2 — REGISTRO DE COMANDOS: PALETA (Ctrl+K) + CAIXA DE PROCESSAMENTO (@aphrodite, 2026-10-17)
+
+Padrões de referência (pesquisa da subtask): **RustGIS** (github opengeos/RustGIS,
+Apache-2.0) tem como pilar "toda ação é um comando scriptável"; **QGIS** tem a
+caixa de ferramentas de processamento com busca (toolbox dockável + palette
+Ctrl+K). Clean-room mantido: nenhuma linha/asset copiado — apenas o padrão de
+UX; **nenhuma dependência nova** (fuzzy match é implementação própria ~30
+linhas em `command_registry.rs`).
+
+### Entregas
+
+| Item | Entregue |
+|---|---|
+| **Command Registry (fonte única)** | ✅ novo `command_registry.rs`: `Command {id, label(i18n), category, shortcut, sep, visible, guard, toggle, run}` — **44 comandos** cobrindo TODA ação de menu/toolbar existente (arquivo, editar, área de trabalho incl. personas/tema/idioma, mapa incl. modos, ferramentas, gerência de projeto, administração, plugins, processamento, ajuda). `run: fn(&mut TerraApp, &Context)`; `guard: fn(&TerraApp) -> Option<chave_i18n>` devolve o **motivo** da desabilitação; `visible` filtra por persona (mesmos flags dos menus). Ids estáveis (`"file.import"`, `"processing.buffer"`…) — a base scriptável do padrão RustGIS |
+| **Menus/toolbars consomem o registro** | ✅ `menus.rs` reescrito: os 10 menus renderizam do registro (`menu_commands`), toolbars idem (`reg_toolbar`/`reg_toolbar_toggle` acionam `run` por id) — **zero comportamento duplicado**: menu, toolbar, paleta e caixa de ferramentas são 4 vistas do MESMO comando. Submenus com marcador (personas/tema/idioma) mantêm a apresentação, mas a ação continua sendo o `run` do registro |
+| **Paleta de comandos (Ctrl+K)** | ✅ novo `palette.rs`: modal com campo de busca focado, **fuzzy match próprio** (subsequência case-insensitive; ranking por posição — consecutivas e início cedo vencem; casa rótulo i18n + categoria com penalidade), ↑/↓ navegam com wrap, Enter executa, Esc/backdrop fecha; cada linha mostra categoria + atalho; ações desabilitadas ficam esmaecidas **com o motivo no hover** (a11y). Aberta por **Ctrl+K** (qualquer foco), menu Área de Trabalho → "Paleta de comandos… (Ctrl+K)" e pelo próprio registro (`workspace.palette`) |
+| **Caixa de processamento (padrão QGIS)** | ✅ novo `toolbox.rs`: janela flutuante/redimensionável (dockável sem crate de docking) com **busca fuzzy** e catálogo `ProcessingTool {id, label, description, params_schema, command}` — hoje: Buffer, Interseção, União (ops PostGIS) + Importar + Exportar. Clicar executa o **comando do registro** → abre o diálogo de parâmetros existente pré-preenchido (ex.: Buffer → diálogo com sufixo `_buffer`). Guardas vêm do comando (sem banco → esmaecida com motivo). Aberta por menu Área de Trabalho, paleta e `workspace.toolbox` |
+| **Extensibilidade (prepara plugin system)** | ✅ documentado no header de `toolbox.rs` (3 passos: Command no registro → ProcessingTool no catálogo → chaves i18n) e teste de integridade: toda tool aponta para comando existente e **todo comando de Processamento tem tool** — a caixa nunca lista ferramenta morta, e plugin novo aparece em menu+paleta+toolbox de graça |
+| **Polish de toolbar** | ✅ tooltips com atalho real: 📂 "Abrir projeto (Ctrl+O)", 📥 "Importar camada (Ctrl+I)", 🗂 navegador (Ctrl+Shift+O, existente); toggles de modo/overlay (✛ identificar, 📍 novo ponto, ⌗ grade, ▭ barra) agora usam `toggle_value` — **mesmo estado hover/ativo** para todos (antes era misto toggle/selectable) |
+| **Título da janela** | ✅ "Curupira GIS — {projeto}" com projeto aberto (dados dinâmicos via `format!`, rótulo via i18n); `ViewportCommand::Title` enviado só quando muda (`last_title` evita comando por frame) |
+| **i18n** | ✅ 191 → **214 chaves** (+23: paleta, caixa de ferramentas, descrições das 5 tools, tooltips com atalho, 6 motivos de desabilitação, 2 idiomas) — pt-BR/en exaustivos, teste de contagem atualizado |
+| **Testes** | ✅ +14 (177 → **191**, todos verdes): registry — ids únicos, fuzzy (não-casa → None, consecutivo/bundo cedo vencem, case-insensitive, vazia casa tudo), busca ranqueada e estável, guardas/visibilidade por persona (Operador/Admin/SIG + paleta esconde invisíveis + undo habilita após edição), toggles refletem estado, run de TODOS os 44 comandos sem panic; toolbox — ids únicos, integridade tool→comando e cobertura de Processamento, busca (vazio/buf/inter/xyz), schemas com parâmetros mínimos; smoke — **Ctrl+K real abre/fecha a paleta** (eventos `ModifiersChanged`+`Key` no ctx headless), todos os comandos renderizam após `run`, toolbox abre/busca/executa pré-preenchendo o diálogo, título com projeto |
+
+### Verificação executada (host Linux, 2026-10-17)
+
+| Check | Resultado |
+|---|---|
+| `cargo build --workspace` | ✅ verde |
+| `cargo test --workspace` | ✅ **191 passed / 0 failed** (177 + 14 novos; gated PG compila e pula sem banco) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ verde |
+| `cargo fmt --all -- --check` | ✅ verde |
+| Smoke visual/GPU | ⚠️ host sem display — checklist v0.2.2 adicionado em `benches/map_render.md` |
+
+### Decisões de design (registradas)
+
+1. **Comportamento mora só no registro**: menu, toolbar, paleta e caixa de ferramentas são vistas do mesmo `Command` — o anti-requisito "sem duplicar" é estrutural (uma ação nova é registrada UMA vez). Testes de integridade barram deriva.
+2. **`guard` devolve motivo i18n** (não booleano): a paleta mostra "Conecte-se a um banco de dados" na ação esmaecida — polimento QGIS/VS Code e a11y (não depende só de cor). Motivos compostos (banco → projeto) encadeiam `or_else`.
+3. **Fuzzy próprio (~30 linhas)**: subsequência case-insensitive com custo = posição inicial + buracos (consecutivas custam 0); empate → ordem do registro. Sem crate nova (regra da subtask); substituível por algo tipo nucleo/nu-AnsiHighlight quando plugin system exigir.
+4. **Personas/tema/idioma como comandos**: paleta cobre troca de persona, tema e idioma (QGIS faz igual); o menu mantém submenus com marcador da corrente, mas a ação é o `run` do registro.
+5. **Toolbox = `egui::Window`** (flutuante/redimensionável), não modal: processamento QGIS é dock que convive com o mapa; a crate de docking fica para quando houver mais docks (YAGNI).
+6. **Atalho real ≠ atalho exibido**: egui não tem aceleradores nativos; o disparo continua em `handle_shortcuts` (Ctrl+K adicionado) e o registro guarda a string para tooltip/paleta.
+7. **Ctrl+K funciona com campo focado** (não é gated por `egui_wants_keyboard_input`): paleta é navegação, como Ctrl+O/Ctrl+I.
+
+### Riscos honestos / limitações
+
+1. **Interação real de paleta (digitar/filtrar/setas sobre o modal em GPU)** não é provável headless — o smoke testa Ctrl+K real, renderização, busca, seleção e execução por caminhos de código; digitação/setas/Enter na janela real ficam no checklist manual novo.
+2. **Dois comandos de idioma com rótulos distintos** (`LangPtBr`/`LangEn`) foram criados para a paleta; o submenu de idioma continua mostrando `display_name()` (apresentação) — os dois caminhos executam o mesmo `set_language`.
+3. **Modo local**: processamento e gerência de projeto aparecem desabilitados com motivo na paleta (e ocultos nos menus por persona, como antes) — usuário Operador/SIG em modo local enxerga na paleta o que falta para habilitar (escolha de design, alinhada com o hint do menu Processamento).
+4. **`params_schema` é documental** nesta fase: o diálogo de parâmetros continua sendo o existente (pré-preenchido pelo comando); schema validado/gerado fica para o plugin system.
+5. **Sem histórico na paleta** (comandos recentes/mais usados) — YAGNI para v0.2.2; o ranking por posição já dá UX boa com 44 comandos.
+
+### Não commitado
+
+Nada foi commitado (instrução da subtask). Arquivos novos: `command_registry.rs`, `palette.rs`, `toolbox.rs` (ta-gui). Modificados: `menus.rs` (consome o registro — toolbars e menus sem comportamento próprio), `app.rs` (estado da paleta/toolbox + Ctrl+K + título da janela), `dialogs.rs` (dispatcher da paleta/caixa), `i18n.rs` (+23 chaves), `lib.rs` (módulos), `tests/app_smoke.rs` (+4 smoke v0.2.2), `benches/map_render.md` (checklist v0.2.2), este STATUS.md.
