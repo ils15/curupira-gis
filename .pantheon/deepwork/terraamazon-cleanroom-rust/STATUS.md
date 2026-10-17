@@ -946,3 +946,32 @@ linhas em `command_registry.rs`).
 ### Não commitado
 
 Nada foi commitado (instrução da subtask). Arquivos novos: `command_registry.rs`, `palette.rs`, `toolbox.rs` (ta-gui). Modificados: `menus.rs` (consome o registro — toolbars e menus sem comportamento próprio), `app.rs` (estado da paleta/toolbox + Ctrl+K + título da janela), `dialogs.rs` (dispatcher da paleta/caixa), `i18n.rs` (+23 chaves), `lib.rs` (módulos), `tests/app_smoke.rs` (+4 smoke v0.2.2), `benches/map_render.md` (checklist v0.2.2), este STATUS.md.
+
+## Fix CI run v0.2.2 — `cargo deny` advisories zbus/zvariant (@prometheus, 2026-10-17)
+
+Run [39048582185](https://api.github.com/repos/ils15/curupira-gis/actions/runs/39048582185) (push v0.2.2): falhou SÓ o job `linux (fmt + clippy + test, sem PG)`; linux-pg, windows e release passaram.
+
+### Causa raiz (log real, job 117442233850)
+
+- `cargo fmt --check`, `cargo clippy -D warnings` e `cargo test --workspace` **passaram** (toolchain CI: rustc 1.99.0; local: 1.99.1 — sem drift relevante).
+- A falha foi a etapa **`cargo deny check licenses advisories bans sources`**: `advisories FAILED` com 3 advisories **INFO/unmaintained** emitidos em 2026-10-17 (véspera da run):
+  - RUSTSEC-2026-0370 (`zvariant`), RUSTSEC-2026-0371 (`zbus_names`), RUSTSEC-2026-0372 (`zvariant_derive`) — "no patched versions"; `zvariant` foi absorvida pelo **zbus 6.0.0**.
+- Cadeia transitiva: `ta-gui → eframe 0.37 → egui-winit 0.37 → accesskit_unix 0.24 → atspi → zbus 5.19 → zvariant 5.15`. O consumidor `accesskit_unix 0.24` ainda requer zbus 5.x → **sem rota de upgrade** (`cargo update` não cruza major incompatível). O `cargo deny` só roda no job linux (ci.yml:47) — por isso os outros jobs passaram.
+- Suspeitas descartadas com evidência: fmt ✅, clippy ✅, testes ✅ no log; job linux **instala** `libgdal-dev` (ci.yml step `apt-get install -y libgdal-dev`) — GDAL não era o problema.
+
+### Fix aplicado (mínimo)
+
+- `deny.toml` → `[advisories] ignore`: +3 entradas documentadas (mesmo padrão já usado para RUSTSEC-2026-0192/ttf-parser), com motivo e condição de remoção (quando egui/accesskit migrar para zbus 6).
+
+### Verificação local (replica comandos exatos do yml, host Linux)
+
+| Check | Resultado |
+|---|---|
+| `cargo deny check licenses advisories bans sources` | ✅ `advisories ok, bans ok, licenses ok, sources ok` |
+| `cargo fmt --all -- --check` | ✅ verde |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ verde |
+| `cargo test --workspace` | ✅ 191 passed / 0 failed (contagens idênticas ao log do CI) |
+
+### Não commitado
+
+Nada commitado (instrução). Modificado: `deny.toml`, este STATUS.md. Arquivos para @iris: `deny.toml` (commit no push de fix).

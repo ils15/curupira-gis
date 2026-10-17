@@ -37,6 +37,13 @@ ignore = [
     # ttf-parser (transitivo de egui/default_fonts) marcado unmaintained —
     # sem vuln ativa; revisar quando egui migrar de fonte de glyphs.
     { id = "RUSTSEC-2026-0192", reason = "unmaintained, transitivo via egui 0.37 default_fonts" },
+    # Stack zbus 5.x (zvariant, zbus_names, zvariant_derive) marcada unmaintained
+    # em 2026-10-17 — INFO, sem vuln ativa e sem versão com patch; zvariant foi
+    # absorvida pelo zbus 6.0.0, mas o consumidor accesskit_unix 0.24 (egui 0.37)
+    # ainda requer zbus 5.x. Revisar/remover quando egui/accesskit migrar para zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "unmaintained, transitivo via accesskit_unix 0.24 (egui 0.37)" },
+    { id = "RUSTSEC-2026-0371", reason = "unmaintained, transitivo via accesskit_unix 0.24 (egui 0.37)" },
+    { id = "RUSTSEC-2026-0372", reason = "unmaintained, transitivo via accesskit_unix 0.24 (egui 0.37)" },
 ]
 
 [bans]
