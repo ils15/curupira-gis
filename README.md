@@ -142,9 +142,13 @@ usa o diálogo (ou `TA_DATABASE_URL` pré-preenchendo o campo URL).
 ## Releases
 
 - Workflow `release.yml` dispara no push de tag `v*` e produz: binários
-  Linux (`tar.gz`) e Windows (`zip` com GDAL/PROJ embutidos), checksums
-  `SHA256SUMS` e SBOM CycloneDX por crate — **sempre como draft** para
-  revisão humana antes de publicar.
+  Linux (`tar.gz` e `.deb`), Windows (`zip` portátil com GDAL/PROJ embutidos
+  + instalador `CurupiraGIS-Setup-x64.exe`), macOS arm64
+  (`CurupiraGIS-macos-arm64.zip`), checksums `SHA256SUMS` e SBOM CycloneDX
+  por crate — **sempre como draft** para revisão humana antes de publicar.
+- **macOS: build NÃO assinado.** No primeiro uso, clique com o botão direito
+  no `CurupiraGIS.app` → **Abrir** (o Gatekeeper bloqueia apps sem notarização;
+  sem esse passo o macOS só diz que o app "não pôde ser verificado").
 - **Decisão de packaging (2026-10-16)**: workflow manual com matrix build em
   vez de [cargo-dist](https://opensource.axo.dev/cargo-dist/). Motivos:
   (a) o workflow do cargo-dist é gerado por `dist init`, que não pode ser
@@ -152,8 +156,9 @@ usa o diálogo (ou `TA_DATABASE_URL` pré-preenchendo o campo URL).
   maquinaria de 20 alvos do cargo-dist; (c) workflow manual é 100%
   auditável e pinado por SHA. Reavaliar cargo-dist pós-alpha (alvo: Linux,
   macOS e Windows com instaladores).
-- Targets de release: `x86_64-unknown-linux-gnu` (tar.gz) e
-  `x86_64-pc-windows-msvc` (zip; instalador MSI planejado pós-alpha).
+- Targets de release: `x86_64-unknown-linux-gnu` (tar.gz + .deb),
+  `x86_64-pc-windows-msvc` (zip portátil + instalador Inno Setup) e
+  `aarch64-apple-darwin` (bundle .app, não assinado).
 
 ## WMS (feature `wms`, opt-in)
 

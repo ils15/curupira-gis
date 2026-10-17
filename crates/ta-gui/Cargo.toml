@@ -42,3 +42,39 @@ path = "src/main.rs"
 [[bench]]
 name = "map_render"
 harness = false
+
+# =============================================================================
+# .deb da release Linux (gerado pelo release.yml, job build-linux, com
+# `cargo deb -p ta-gui --no-build`) — UM pacote com os DOIS binários do
+# workspace: o executável da marca pública `curupira-gis` + `ta-cli` (os
+# paths começando com `target/` resolvem contra o target-dir do workspace,
+# então embalamos os dois bins a partir deste crate).
+# =============================================================================
+[package.metadata.deb]
+# Mantém a marca pública (crate segue `ta-gui`, mesmo padrão do [[bin]]).
+name = "curupira-gis"
+maintainer = "ils15 <ils15@users.noreply.github.com>"
+copyright = "2026 Curupira GIS contributors"
+# cargo-deb 3.x: campo `license` não existe no metadata (usa o [package].
+# license = "MIT OR Apache-2.0" do workspace); license-file alimenta o
+# copyright do pacote ("caminho relativo ao crate", parágrafo 1).
+license-file = ["../../LICENSE-MIT", "1"]
+section = "science"
+priority = "optional"
+# dpkg-shlibdeps resolve as dependências REAIS dos binários (libgdal34/35...
+# conforme o Ubuntu que gerou o pacote; ubuntu-latest 24.04 → libgdal34).
+# Mais seguro que fixar "libgdal35 | libgdal34" manualmente.
+depends = "$auto"
+extended-description = """\
+Curupira GIS — visualizador/importador geoespacial desktop (egui/eframe) e \
+CLI de import/export (SHP, GeoJSON, GeoPackage, GeoTIFF, FlatGeobuf, CSV-XY). \
+GDAL é link dinâmico do sistema (libgdal34/35); banco de camadas requer \
+PostgreSQL 16 + PostGIS 3.4 (ver README.md)."""
+assets = [
+    ["target/release/curupira-gis", "usr/bin/", "755"],
+    ["target/release/ta-cli", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/curupira-gis/", "644"],
+    ["../../LICENSE-MIT", "usr/share/doc/curupira-gis/", "644"],
+    ["../../LICENSE-APACHE", "usr/share/doc/curupira-gis/", "644"],
+    ["../../NOTICE.md", "usr/share/doc/curupira-gis/", "644"],
+]

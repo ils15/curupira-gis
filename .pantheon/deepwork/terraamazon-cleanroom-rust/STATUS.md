@@ -255,6 +255,47 @@ com display (listado em `benches/map_render.md`).
 | INSTALL.md | ✅ por OS (Windows: zip c/ GDAL embutida + PG16/PostGIS 3.4 via EDB/StackBuilder + `TA_DATABASE_URL`; Linux: apt libgdal + PG via compose; primeiro-run com fixtures `testdata/`) |
 | `main.rs` | ✅ helper `use_bundled_gdal_data()` aponta `PROJ_LIB`/`GDAL_DATA` p/ dados ao lado do exe (unsafe de `set_var` edition-2024 justificado: roda single-thread no início de `main`) |
 
+### Entregáveis pedidos pelo usuário: instalador .exe / .deb / macOS (EM PROGRESSO, @prometheus, 2026-10-17)
+
+Complemento do draft: 3 artefatos NOVOS além do zip Windows + tar.gz Linux +
+SBOMs existentes (que ficam intocados). Jobs existentes do `release.yml`
+preservados — apenas steps adicionados ao final + novo job `macos`.
+
+| Item | Estado |
+|---|---|
+| **Windows: instalador `CurupiraGIS-Setup-x64.exe`** (Inno Setup) | 🔄 `packaging/windows/curupira.iss` criado (AppVersion via /DVERSION numérico, id fixo, licença MIT, pt-BR+en, atalhos menu iniciar/desktop, DLLs+`share\gdal`+`share\proj` alinhados ao layout `<exe>\share\...` do helper `use_bundled_gdal_data()` do main.rs — **nenhuma** env gravada no registro). Steps novos no job windows: localizar `ISCC.exe` (PATH → caminhos padrão → **fallback `choco install innosetup -y --no-progress`**) + staging `dist\installer-stage` (mesma composição do zip) + artifact `dist-windows-setup` |
+| **Linux: `curupira-gis_x64.deb`** (cargo-deb) | 🔄 `[package.metadata.deb]` em crates/ta-gui (pacote `curupira-gis` com os DOIS bins em `/usr/bin` + docs; `depends = "$auto"`); steps novos no job linux (cache + `cargo install cargo-deb --locked` — **não apt**, versão 1.42 do ubuntu-24.04 diverge da 3.x validada) + artifact `dist-linux-deb`; tar.gz existente mantido |
+| **macOS: `CurupiraGIS-macos-arm64.zip`** (novo job) | 🔄 job `build-macos` (macos-latest/arm64): `brew install gdal pkg-config` + build + `packaging/macos/bundle.sh` (monta `CurupiraGIS.app`, walk recursivo `otool -L` copiando dylibs não-sistema p/ `Contents/Frameworks`, reescrita `install_name_tool -change`/`-id` p/ `@rpath` + `-add_rpath`, **re-sign ad-hoc obrigatória pós-modificação no arm64**, zip via ditto) + artifact `dist-macos`; README/INSTALL: nota Gatekeeper (botão direito → Abrir) |
+| Release job | 🔄 `needs` + `build-macos`; checksums agora incluem `*.exe *.deb`; notas do draft citam os 3 novos artefatos + Gatekeeper |
+
+### Decisões destes entregáveis (2026-10-17)
+
+1. **macOS GDAL: brew corrente + bindings pré-gerados do gdal-sys 0.12** (contrato 3.4–3.12, ver decisão 2 abaixo). NÃO há `gdal@3.12` versionado no homebrew-core; feature `bindgen` (plano B documentado no YAML com `::warning` se brew > 3.12) exigiria LIBCLANG_PATH do llvm do brew — mais lento/fragil. `pkg-config` resolve versão/flags no macOS (sem GDAL_VERSION env).
+2. **depends=$auto no .deb** em vez de fixar `libgdal35 | libgdal34`: dpkg-shlibdeps resolve a libgdal REAL do Ubuntu que gerou o pacote.
+3. **Instalador espelha o layout do zip** (`{app}\*.exe|*.dll` + `{app}\share\...`): zero mudança no main.rs; PROJ_LIB/GDAL_DATA seguem sendo resolvidos em runtime pelo helper existente.
+4. **cargo-deb via cargo install (3.x) com cache**, não apt (1.42 de 2021 divergente do que foi validado localmente).
+
+### Verificação executada (host Linux, 2026-10-17) — HONESTO
+
+| Check | Resultado |
+|---|---|
+| `release.yml` | ✅ PyYAML parse + assertions: 5 jobs (`build-linux`, `build-windows`, `build-macos`, `sbom`, `release`), todas as `uses:` com SHA de 40 hex, steps/artifacts novos presentes (`dist-linux-deb`, `dist-windows-setup`, `dist-macos`), fallback choco presente |
+| `cargo build --workspace` / fmt / clippy `-D warnings` | ✅ verdes (após incluir `[package.metadata.deb]`) |
+| **`.deb` metadata** | ✅ **validado de verdade**: `cargo install cargo-deb` (3.8.0, <1 min) → `cargo deb -p ta-gui --no-build` gerou `curupira-gis_0.1.0-1_amd64.deb` (8,1 MB) com os 2 bins em `/usr/bin`, docs, copyright e **`Depends: libc6 (>= 2.39), libgdal34t64 (>= 3.0.0)`** — $auto resolveu a libgdal do sistema (host 24.04: `libgdal34t64`; runner resolverá libgdal34/35 equivalente). Nota: exigiu `LD_LIBRARY_PATH` limpo — o conda deste host contamina a resolução do dpkg-shlibdeps (não existe no runner) |
+| `bundle.sh` (lógica, sem macOS no host) | ✅ simulado com stubs de `otool`/`install_name_tool`/`codesign`/`ditto`/`cp` (`/tmp/opencode/bundle-mock`): walk transitivo correto (libproj copiada via dependência da cópia do gdal), sistema (/usr/lib, /System) e `@*` ignorados, `-id`/`-change`/`-add_rpath` com args exatos, codesign nas 2 dylibs + 2 exes, **idempotente** (run 2 == run 1, byte a byte no log), Info.plist XML válido |
+| `bash -n bundle.sh` | ✅ |
+| `curupira.iss` | ⚠️ **revisão manual linha a linha** (Inno Setup não compila em Linux): paths relativos ao .iss conferidos contra o staging montado pelo job (`dist\installer-stage`), sintaxe ISPP ({#...}/#ifndef/#error) e constantes Inno 6 conferidas em documentação de memória — **[UNKNOWN] compilação real do ISCC** |
+| ISCC.exe pré-instalado no windows-latest | ⚠️ não provável neste host — step tem 3 níveis (PATH → `Program Files (x86)/Inno Setup 6` → choco) e falha com mensagem clara se todos faltarem |
+| brew GDAL > 3.12 no runner | ⚠️ [UNKNOWN] versão atual do brew no macos-latest (websearch indisponível no host em 2026-10-17) — se > 3.12, gdal-sys falha cedo com erro explícito; plano B documentado no YAML |
+
+### Risco residual — "a run #1 do novo release prova:" (resolução na próxima tag)
+
+1. **ISCC compila o .iss** (língua pt-BR: nome real do .isl no Inno do runner — o workflow resolve e injeta via `/DBR_ISL`; fallback estático do .iss cobre compilação manual). Se o Inno do runner for < 6.3, `ArchitecturesInstallIn64BitMode=x64compatible` falha → trocar p/ `x64` ( improvável: imagem 2026).
+2. **dpkg-shlibdeps no runner limpo** resolve `libgdal34/35` p/ o Depends (aqui provado com libgdal34t64; mesma mecânica).
+3. **brew GDAL ≤ 3.12** no macos-latest (senão: plano B bindgen, documentado no job).
+4. **codesign ad-hoc do bundle** roda no arm64 (re-sign pós `install_name_tool` está no script; o stub validou só a sequência, não o codesign real).
+5. **`ditto`/`otool`/`install_name_tool` disponíveis** no runner (nativos do macOS — risco baixo).
+
 ### Decisões da Fase 4
 
 1. **cargo-dist descartado (por agora) → workflow manual de release.** Motivos: (a) o workflow do cargo-dist é gerado por `dist init`, impossível de produzir/validar neste host; (b) 2 alvos não justificam a maquinaria de 20; (c) workflow manual 100% auditável e SHA-pinado. Documentado no README (§ Releases); reavaliar pós-alpha. `x86_64-unknown-linux-gnu` (tar.gz) + `x86_64-pc-windows-msvc` (zip; **MSI pós-alpha**).

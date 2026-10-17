@@ -12,6 +12,12 @@ name: release
 #
 # GATE HUMANO MANTIDO: a release é sempre criada como **draft**; publicar
 # exige um humano marcando "Publish" na página da release.
+#
+# 2026-10-17 (entregáveis pedidos pelo usuário, @prometheus): além do zip
+# Windows + tar.gz Linux + SBOMs existentes, o draft passa a incluir
+# instalador Windows (Inno Setup/ISCC), .deb (cargo-deb) e macOS arm64
+# (CurupiraGIS.app zip via packaging/macos/bundle.sh). Jobs existentes
+# intactos — apenas steps adicionados ao final.
 
 on:
   push:
@@ -61,6 +67,35 @@ jobs:
         with:
           name: dist-linux
           path: dist/*.tar.gz
+          if-no-files-found: error
+
+      # --- .deb (novo; tar.gz acima permanece) -----------------------------
+      # cargo-deb via cargo install (NÃO apt): o apt do ubuntu-24.04 traz
+      # cargo-deb 1.42 (2021) com comportamento divergente do validado neste
+      # projeto (cargo-deb 3.x — `cargo deb --no-build` e depends=$auto
+      # verificados localmente em 2026-10-17). Cache do binário evita
+      # recompilar a cada release.
+      - name: Cache cargo-deb
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-deb
+          key: cargo-deb-${{ runner.os }}-3.x-v1
+
+      - name: Instala cargo-deb
+        run: command -v cargo-deb >/dev/null 2>&1 || cargo install cargo-deb --locked
+
+      - name: Empacota .deb (curupira-gis + ta-cli)
+        # [package.metadata.deb] em crates/ta-gui/Cargo.toml embala os DOIS
+        # binários (name do pacote: curupira-gis; depends=$auto resolve
+        # libgdal34/35 via dpkg-shlibdeps). --no-build reusa o build acima.
+        run: |
+          cargo deb -p ta-gui --no-build
+          cp -v target/debian/curupira-gis_*.deb dist/curupira-gis_x64.deb
+
+      - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: dist-linux-deb
+          path: dist/curupira-gis_x64.deb
           if-no-files-found: error
 
   build-windows:
@@ -175,6 +210,129 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
 
+      # --- instalador .exe com Inno Setup (novo; zip acima permanece) ------
+      # ISCC.exe vem pré-instalado no windows-latest (image docs: Inno Setup
+      # 6) mas nem sempre no PATH — a checagem abaixo equivale a `where iscc`
+      # seguida dos caminhos padrão; fallback: choco install innosetup.
+      - name: Localiza ISCC.exe (Inno Setup 6) — fallback choco
+        shell: pwsh
+        run: |
+          $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          if ($cmd) {
+            $isccPath = $cmd.Source
+            Write-Host "ISCC no PATH: $isccPath"
+          } else {
+            $candidates = @(
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+            ) | Where-Object { $_ -and (Test-Path $_) }
+            if ($candidates) {
+              $isccPath = $candidates[0]
+              Write-Host "ISCC fora do PATH, encontrado em: $isccPath"
+            } else {
+              Write-Host "ISCC ausente no runner — instalando via Chocolatey..."
+              choco install innosetup -y --no-progress
+              $isccPath = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+              if (-not (Test-Path $isccPath)) {
+                throw "choco install innosetup concluiu, mas $isccPath não existe"
+              }
+            }
+          }
+          "ISCC_PATH=$isccPath" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+
+      - name: Compila instalador (Inno Setup) → CurupiraGIS-Setup-x64.exe
+        shell: pwsh
+        run: |
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT; if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
+          $bin = Join-Path $vcpkgRoot "installed\x64-windows\bin"
+          $share = Join-Path $vcpkgRoot "installed\x64-windows\share"
+          # Staging consumido por packaging\windows\curupira.iss (mesma
+          # composição do zip portátil): exes + *.dll + share\gdal + share\proj
+          $stage = "dist\installer-stage"
+          New-Item -ItemType Directory -Force -Path "$stage\share" | Out-Null
+          Copy-Item target\release\curupira-gis.exe $stage\
+          Copy-Item target\release\ta-cli.exe $stage\
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, NOTICE.md $stage\
+          Copy-Item "$bin\*.dll" $stage\
+          Copy-Item -Recurse "$share\proj" "$stage\share\proj"
+          Copy-Item -Recurse "$share\gdal" "$stage\share\gdal"
+          # AppVersion do Inno precisa ser numérica pontuada (x.y[.z[.w]]) em
+          # qualquer 6.x: "v0.1.0-alpha" → VERSION=0.1.0.
+          $version = $env:GITHUB_REF_NAME -replace '^v',''
+          $numeric = ($version -split '-')[0]
+          # Tradução pt-BR: nome do .isl varia entre builds do Inno 6 —
+          # resolve o arquivo real e passa /DBR_ISL (o .iss tem fallback
+          # estático p/ compilação manual).
+          $langsDir = Join-Path (Split-Path $env:ISCC_PATH) "Languages"
+          $brIsl = Get-ChildItem $langsDir -Filter *.isl |
+            Where-Object { $_.Name -imatch "brazil" } | Select-Object -First 1
+          if (-not $brIsl) {
+            throw "tradução pt-BR não encontrada em $langsDir — .isl presentes: " +
+              ((Get-ChildItem $langsDir -Filter *.isl | Select-Object -ExpandProperty Name) -join ', ')
+          }
+          & $env:ISCC_PATH "packaging\windows\curupira.iss" `
+            "/DVERSION=$numeric" "/DBR_ISL=compiler:Languages\$($brIsl.Name)"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC falhou com exit $LASTEXITCODE" }
+          $setup = Get-Item dist\CurupiraGIS-Setup-x64.exe
+          Write-Host "Instalador gerado: $($setup.FullName) ($([math]::Round($setup.Length/1MB,1)) MB)"
+
+      - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: dist-windows-setup
+          path: dist/CurupiraGIS-Setup-x64.exe
+          if-no-files-found: error
+
+  build-macos:
+    name: macos arm64 (CurupiraGIS.app zip, GDAL via Homebrew)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Instala toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+
+      # DECISÃO GDAL/macOS (2026-10-17, @prometheus):
+      #   caminho escolhido = brew gdal CORRENTE + bindings PRÉ-GERADOS do
+      #   gdal-sys 0.12 (contrato verificado na Fase 4: cobre GDAL 3.4–3.12;
+      #   brew está em ~3.11/3.12).
+      #   - NÃO fixamos gdal@<versão>: não existe fórmula versionada de gdal
+      #     no homebrew-core (gdal@3.12 não existe).
+      #   - NÃO habilitamos a feature "bindgen" do crate gdal: mais lento e
+      #     mais frágil (exigiria LIBCLANG_PATH=$(brew --prefix llvm)/lib e
+      #     llvm extra). GDAL_VERSION env não é usado no macOS (pkg-config
+      #     resolve versão e flags do gdal-sys automaticamente).
+      #   - Se o brew subir p/ >3.12, o build falha NO build.rs do gdal-sys
+      #     com erro explícito de versão sem binding — plano B documentado:
+      #     habilitar feature bindgen do gdal + LIBCLANG_PATH do llvm do brew.
+      - name: GDAL via Homebrew (pkg-config resolve p/ gdal-sys)
+        run: |
+          brew install gdal pkg-config
+          echo "brew GDAL: $(pkg-config --modversion gdal) em $(brew --prefix gdal)"
+          if pkg-config --modversion gdal | awk -F. '{exit !($1>3 || ($1==3 && $2>12))}'; then
+            echo "::warning::GDAL > 3.12 — gdal-sys 0.12 não tem binding pré-gerado; ver DECISÃO acima (plano B: feature bindgen)"
+          fi
+
+      - name: Build release
+        run: cargo build --release --workspace
+
+      - name: Bundle CurupiraGIS.app + zip (otool walk, @rpath, re-sign ad-hoc)
+        # O bundle.sh faz: Contents/{MacOS,Resources,Frameworks} + Info.plist,
+        # copia dylibs não-sistema (otool -L recursivo), reescreve p/ @rpath
+        # com install_name_tool, RE-ASSINA ad-hoc (obrigatório no arm64 após
+        # install_name_tool) e zipa CurupiraGIS-macos-arm64.zip.
+        run: |
+          v="${GITHUB_REF_NAME#v}"; v="${v%%-*}"
+          bash packaging/macos/bundle.sh "$v" target/release dist
+
+      # NOTA (usuário final): zip NÃO assinado — no 1º uso, botão direito no
+      # CurupiraGIS.app → "Abrir" para passar pelo Gatekeeper (documentado
+      # no README/INSTALL).
+      - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: dist-macos
+          path: dist/CurupiraGIS-macos-arm64.zip
+          if-no-files-found: error
+
   sbom:
     name: SBOM CycloneDX (workspace)
     runs-on: ubuntu-latest
@@ -205,7 +363,7 @@ jobs:
 
   release:
     name: Draft GitHub Release (revisão humana publica)
-    needs: [build-linux, build-windows, sbom]
+    needs: [build-linux, build-windows, build-macos, sbom]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -216,7 +374,7 @@ jobs:
       - name: Checksums sha256
         run: |
           cd artifacts
-          sha256sum *.tar.gz *.zip *.cdx.json | tee SHA256SUMS
+          sha256sum *.exe *.deb *.tar.gz *.zip *.cdx.json | tee SHA256SUMS
 
       - name: Cria release DRAFT com artefatos + checksums + SBOM
         env:
@@ -227,8 +385,11 @@ jobs:
             --draft \
             --title "Curupira GIS $GITHUB_REF_NAME" \
             --notes "Draft automático da tag ${GITHUB_REF_NAME}.
-          Inclui binários Linux (tar.gz, GDAL do sistema) e Windows (zip com
-          GDAL/PROJ embutidos), checksums SHA256SUMS e SBOM CycloneDX.
+          Linux: tar.gz (GDAL do sistema) + .deb | Windows: zip portátil com
+          GDAL/PROJ embutidos + instalador CurupiraGIS-Setup-x64.exe |
+          macOS arm64: CurupiraGIS-macos-arm64.zip (NÃO assinado — no 1º
+          uso, botão direito → Abrir, para passar pelo Gatekeeper).
+          Inclui checksums SHA256SUMS e SBOM CycloneDX.
           **Requer revisão humana antes de publicar.**" \
             --verify-tag \
             artifacts/*
