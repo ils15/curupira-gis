@@ -35,13 +35,13 @@
   #error "Compile com /DVERSION=x.y.z (numérico, ex.: 0.1.0)"
 #endif
 
-; Tradução pt-BR: o nome do arquivo .isl varia entre distribuições/versões do
-; Inno Setup (BrazilianPortuguese.isl no Inno 6 oficial; PortugueseBrazil.isl
-; em builds antigos/alternativos). O workflow resolve o arquivo real em
-; Languages\ e passa /DBR_ISL; o fallback estático cobre compilação manual.
-#ifndef BR_ISL
-  #define BR_ISL "compiler:Languages\BrazilianPortuguese.isl"
-#endif
+; Tradução pt-BR (opcional): o nome do arquivo .isl varia entre
+; distribuições/versões do Inno Setup (BrazilianPortuguese.isl no Inno 6
+; oficial; PortugueseBrazil.isl em builds antigos/alternativos). O workflow
+; resolve o .isl no Languages\ do ISCC REAL e passa /DBR_ISL; SEM /DBR_ISL o
+; instalador compila EN-only (degradação graciosa pós-run #3 — ausência de
+; idioma NUNCA deve falhar o job; antes o fallback estático abaixo exigia o
+; arquivo mesmo sem /DBR_ISL e quebrava o caminho EN-only).
 
 [Setup]
 ; AppId FIXO: identifica o app no Adicionar/Remover Programas — não regenerar
@@ -67,7 +67,9 @@ SolidCompression=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+#ifdef BR_ISL
 Name: "ptbr"; MessagesFile: "{#BR_ISL}"
+#endif
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; \

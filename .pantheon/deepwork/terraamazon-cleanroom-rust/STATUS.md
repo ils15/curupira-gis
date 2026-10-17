@@ -454,6 +454,98 @@ build script morre com "windows-msvc requires gdal_i.lib".
    e (b) o load da `gdal.dll` + dependências transitivas via PATH no primeiro
    binário executado (`cargo test`).
 
+### Run #3 — release (tag, 2026-10-17): 2 jobs falharam (macOS + Windows)
+
+| Job | Resultado |
+|-----|-----------|
+| `build-linux` | ✅ verde (tar.gz + .deb) |
+| `sbom` | ✅ verde |
+| `build-windows` | ❌ falhou no step "Compila instalador (Inno Setup)" |
+| `build-macos` | ❌ falhou no build.rs do gdal-sys |
+| `release` (draft) | ⏭️ pulado (`needs` reprovado) |
+
+#### Causa 1 — macOS: GDAL 3.13 sem binding pré-gerado
+
+`gdal-sys 0.12 build.rs:282 — panic: No pre-built bindings available for GDAL
+version 3.13`. O Homebrew subiu p/ GDAL 3.13 e os bindings pré-gerados do
+gdal-sys 0.12 vão até 3.12 (`prebuilt-bindings/3_4..3_12`) — exatamente o
+`::warning::` previsto no step antigo. Sem feature bindgen, o build.rs só copia
+o binding pré-gerado da versão e morre.
+
+**Fix (com contratos verificados no fonte do registry):**
+
+1. `crates/ta-gis/Cargo.toml`: feature nova `bindgen-gdal = ["gdal/bindgen"]`.
+   O gdal 0.19.0 reexporta: `bindgen = ["gdal-sys/bindgen"]` (seção [features]
+   do Cargo.toml do crate); habilitar `dep/feat` ativa o dep opcional
+   implicitamente.
+2. `release.yml` (job macOS): build virou
+   `cargo build --release -p ta-gui -p ta-cli --features ta-gis/bindgen-gdal`
+   — ambos os pacotes dependem de ta-gis (ta-gui direto + feature `gdal`;
+   ta-cli via default feature) e geram os 2 binários da release. Com bindgen
+   não há teto de versão: bindings gerados dos headers via libclang, mesma
+   allowlist do prebuilt; `GDAL_VERSION` env não é usado nesse caminho (só
+   alimentaria o prebuilt) — macOS nunca o definiu.
+3. Fallback de libclang (`brew install llvm` + `LIBCLANG_PATH`) incluído
+   **comentado** no workflow com instrução de quando ativar (runners macOS têm
+   Xcode CLT; clang-sys normalmente resolve).
+
+#### Causa 2 — Windows: shim do Chocolatey sem diretório `Languages`
+
+`Get-Command ISCC.exe` achou o **shim** (`C:\ProgramData\Chocolatey\bin\
+ISCC.exe`), e `Split-Path` do shim derivou `$langsDir =
+C:\ProgramData\Chocolatey\bin\Languages` → `Get-ChildItem` explodiu ("Cannot
+find path"; o shell pwsh do GitHub promove erro não-terminal a falha).
+
+**Fix (step "Localiza ISCC.exe real"):** resolução do ISCC.exe REAL em ordem —
+(1) `%ProgramFiles(x86)%\Inno Setup 6`, (2) `%ProgramFiles%\Inno Setup 6`,
+(3) registry (uninstall keys, `DisplayName -like 'Inno Setup*'` →
+`InstallLocation`), (4) tools do choco
+(`C:\ProgramData\chocolatey\lib\innosetup\tools\**\ISCC.exe` recursivo),
+(5) último recurso `choco install innosetup` + re-derivar do (4).
+`$langsDir` agora deriva do dir do ISCC real. Degradação graciosa: sem
+`*.isl` brazil em `Languages\`, compila **SEM /DBR_ISL** (EN-only) +
+`::warning::pt-BR ISL não encontrado` — idioma nunca mais falha o job.
+Para o caminho EN-only funcionar, `curupira.iss` mudou: a entrada pt-BR em
+[Languages] ficou sob `#ifdef BR_ISL` (o fallback estático antigo
+`#ifndef BR_ISL → BrazilianPortuguese.isl` exigiria o arquivo mesmo sem a
+flag e quebraria o modo EN-only).
+
+#### Verificação local (host Linux, 2026-10-17)
+
+| Check | Resultado |
+|-------|-----------|
+| pyyaml release.yml + ci.yml | ✅ (jobs: 5 e 3, estrutura íntegra) |
+| `cargo build --workspace --offline` | ✅ 2,6s (cache quente; lock intacto no grafo default) |
+| `cargo build -p ta-gui -p ta-cli --features ta-gis/bindgen-gdal` | ✅ 8,0s (conjunto de args exato do workflow, perfil dev) |
+| Prova do caminho bindgen | ✅ `output` do build-script com **0** `rustc-cfg` (o prebuilt emitiria `gdal_sys_3_8_4`); `bindings.rs` gerado na hora por rust-bindgen **0.72.1** via libclang-18 contra GDAL **3.8.4** do host (403 KB vs 346 KB do prebuilt 3_8) |
+| `cargo metadata --features ta-gis/bindgen-gdal` | ✅ `bindgen-gdal` na feature list do ta-gis |
+| `cargo tree -e features -i gdal-sys` (com a feature) | ✅ cadeia `ta-gis/bindgen-gdal → gdal/bindgen → gdal-sys/bindgen`; sem a feature: só `default` (controle) |
+| Sintaxe PowerShell dos steps Windows | ⚠️ revisão manual (pwsh não existe no host; pyyaml valida o YAML) |
+
+`Cargo.lock` ganhou as entradas opcionais do bindgen (bindgen 0.72.1,
+clang-sys 1.9.1, cexpr…) — comportamento esperado: a lockfile registra deps
+alcançáveis por features do workspace p/ resolução offline posterior. Sem
+`--locked` no CI, inocuo; commitar junto.
+
+#### Não comprovável no host ([UNKNOWN] p/ a run #4)
+
+1. macOS: libclang do Xcode CLT no runner real (clang-sys costuma achar; se
+   falhar, descomentar o step de fallback `brew llvm` já presente no yml).
+2. Windows: execução real dos steps PowerShell (registry/shim do runner);
+   degradação EN-only revisada por leitura, não executada.
+3. Risco latente (documentado): se o vcpkg subir GDAL > 3.12, o job Windows
+   precisará do mesmo `bindgen-gdal` — hoje (3.12.4) continua no prebuilt
+   `3_12` via `GDAL_VERSION` env, intocado.
+
+#### Arquivos p/ @iris (commit + push, sem publicar release)
+
+1. `crates/ta-gis/Cargo.toml` — feature `bindgen-gdal`
+2. `Cargo.lock` — entradas opcionais do bindgen (consequência da 1)
+3. `.github/workflows/release.yml` — build macOS com feature + fallback
+   libclang comentado + resolução do ISCC real + degradação EN-only
+4. `packaging/windows/curupira.iss` — pt-BR sob `#ifdef BR_ISL`
+5. Este STATUS.md
+
 ### Pendências pós-push (Fase 4)
 
 1. Acompanhar run de CI — **principalmente job `windows`** (vcpkg/gdal-sys: primeira prova real; `actionlint` não existia no host, validação foi manual).

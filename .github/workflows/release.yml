@@ -211,33 +211,58 @@ jobs:
           if-no-files-found: error
 
       # --- instalador .exe com Inno Setup (novo; zip acima permanece) ------
-      # ISCC.exe vem pré-instalado no windows-latest (image docs: Inno Setup
-      # 6) mas nem sempre no PATH — a checagem abaixo equivale a `where iscc`
-      # seguida dos caminhos padrão; fallback: choco install innosetup.
-      - name: Localiza ISCC.exe (Inno Setup 6) — fallback choco
+      # Run #3 (root cause): `Get-Command ISCC.exe` achou o SHIM do Chocolatey
+      # (C:\ProgramData\chocolatey\bin\ISCC.exe) e o dir "Languages" derivado
+      # do shim não existe → Get-ChildItem explodiu ("Cannot find path").
+      # Correção: resolver o ISCC.exe REAL nesta ordem (1ª que existir vence):
+      #   1. %ProgramFiles(x86)%\Inno Setup 6\ISCC.exe
+      #   2. %ProgramFiles%\Inno Setup 6\ISCC.exe
+      #   3. registry (uninstall keys com DisplayName "Inno Setup*") → InstallLocation
+      #   4. tools do pacote choco: C:\ProgramData\chocolatey\lib\innosetup\tools\**\ISCC.exe
+      #   5. último recurso: `choco install innosetup` e re-derivar do (4)
+      - name: Localiza ISCC.exe real (Inno Setup 6) — nunca o shim do choco
         shell: pwsh
         run: |
-          $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-          if ($cmd) {
-            $isccPath = $cmd.Source
-            Write-Host "ISCC no PATH: $isccPath"
-          } else {
-            $candidates = @(
-              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-              "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          $ErrorActionPreference = 'Stop'
+          function Find-ISCC {
+            $std = @(
+              (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+              (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
             ) | Where-Object { $_ -and (Test-Path $_) }
-            if ($candidates) {
-              $isccPath = $candidates[0]
-              Write-Host "ISCC fora do PATH, encontrado em: $isccPath"
-            } else {
-              Write-Host "ISCC ausente no runner — instalando via Chocolatey..."
-              choco install innosetup -y --no-progress
-              $isccPath = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-              if (-not (Test-Path $isccPath)) {
-                throw "choco install innosetup concluiu, mas $isccPath não existe"
+            if ($std) { return $std[0] }
+
+            $uninstKeys = @(
+              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+              'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+              'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+            )
+            foreach ($root in $uninstKeys) {
+              $hit = Get-ItemProperty $root -ErrorAction SilentlyContinue |
+                Where-Object { $_.DisplayName -like 'Inno Setup*' -and $_.InstallLocation } |
+                ForEach-Object { Join-Path $_.InstallLocation 'ISCC.exe' } |
+                Where-Object { Test-Path $_ } | Select-Object -First 1
+              if ($hit) { return $hit }
+            }
+
+            $tools = 'C:\ProgramData\chocolatey\lib\innosetup\tools'
+            $fromTools = {
+              if (Test-Path $tools) {
+                Get-ChildItem $tools -Recurse -Filter ISCC.exe -ErrorAction SilentlyContinue |
+                  Select-Object -First 1 -ExpandProperty FullName
               }
             }
+            $hit = & $fromTools
+            if ($hit) { return $hit }
+
+            Write-Host "ISCC ausente no runner — instalando via Chocolatey..."
+            choco install innosetup -y --no-progress
+            $hit = & $fromTools
+            if ($hit) { return $hit }
+            throw "ISCC.exe não encontrado após 'choco install innosetup' (procurado em Program Files, registry e $tools)"
           }
+
+          $isccPath = Find-ISCC
+          Write-Host "ISCC real: $isccPath"
           "ISCC_PATH=$isccPath" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
 
       - name: Compila instalador (Inno Setup) → CurupiraGIS-Setup-x64.exe
@@ -260,18 +285,26 @@ jobs:
           # qualquer 6.x: "v0.1.0-alpha" → VERSION=0.1.0.
           $version = $env:GITHUB_REF_NAME -replace '^v',''
           $numeric = ($version -split '-')[0]
-          # Tradução pt-BR: nome do .isl varia entre builds do Inno 6 —
-          # resolve o arquivo real e passa /DBR_ISL (o .iss tem fallback
-          # estático p/ compilação manual).
+          # Tradução pt-BR (OPCIONAL — nunca falha o job por idioma): o
+          # Languages\ fica no dir do ISCC REAL resolvido no step anterior (o
+          # "compiler:" do Inno resolve contra esse dir; o shim do choco da
+          # run #3 não tinha Languages\). O nome do .isl varia entre builds do
+          # Inno 6 (BrazilianPortuguese.isl / PortugueseBrazil.isl). Sem .isl:
+          # compila SEM /DBR_ISL (EN-only) + ::warning::.
           $langsDir = Join-Path (Split-Path $env:ISCC_PATH) "Languages"
-          $brIsl = Get-ChildItem $langsDir -Filter *.isl |
-            Where-Object { $_.Name -imatch "brazil" } | Select-Object -First 1
-          if (-not $brIsl) {
-            throw "tradução pt-BR não encontrada em $langsDir — .isl presentes: " +
-              ((Get-ChildItem $langsDir -Filter *.isl | Select-Object -ExpandProperty Name) -join ', ')
+          $isccArgs = @("/DVERSION=$numeric")
+          if (Test-Path $langsDir) {
+            $brIsl = Get-ChildItem $langsDir -Filter *.isl -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -imatch "brazil" } | Select-Object -First 1
+            if ($brIsl) {
+              $isccArgs += "/DBR_ISL=compiler:Languages\$($brIsl.Name)"
+              Write-Host "Tradução pt-BR: $($brIsl.Name)"
+            }
           }
-          & $env:ISCC_PATH "packaging\windows\curupira.iss" `
-            "/DVERSION=$numeric" "/DBR_ISL=compiler:Languages\$($brIsl.Name)"
+          if ($isccArgs.Count -eq 1) {
+            Write-Host "::warning::pt-BR ISL não encontrado em $langsDir — instalador EN-only"
+          }
+          & $env:ISCC_PATH "packaging\windows\curupira.iss" @isccArgs
           if ($LASTEXITCODE -ne 0) { throw "ISCC falhou com exit $LASTEXITCODE" }
           $setup = Get-Item dist\CurupiraGIS-Setup-x64.exe
           Write-Host "Instalador gerado: $($setup.FullName) ($([math]::Round($setup.Length/1MB,1)) MB)"
@@ -291,29 +324,42 @@ jobs:
       - name: Instala toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
-      # DECISÃO GDAL/macOS (2026-10-17, @prometheus):
-      #   caminho escolhido = brew gdal CORRENTE + bindings PRÉ-GERADOS do
-      #   gdal-sys 0.12 (contrato verificado na Fase 4: cobre GDAL 3.4–3.12;
-      #   brew está em ~3.11/3.12).
+      # DECISÃO GDAL/macOS (revisada 2026-10-17 pós-run #3, @prometheus):
+      #   caminho escolhido = brew gdal CORRENTE + bindings GERADOS NO BUILD
+      #   (feature `bindgen` do gdal-sys via `bindgen-gdal` do ta-gis).
+      #   Run #3 provou o teto do plano antigo (bindings pré-gerados): o brew
+      #   subiu p/ GDAL 3.13 e o gdal-sys 0.12 só embute bindings até 3.12
+      #   (prebuilt-bindings/3_4..3_12) → panic no build.rs:282 ("No pre-built
+      #   bindings available for GDAL version 3.13") — exatamente o ::warning
+      #   previsto no step antigo.
+      #   - gdal/bindgen → gdal-sys/bindgen (reexport confirmado no Cargo.toml
+      #     do gdal 0.19). Com bindgen NÃO há teto de versão: os bindings são
+      #   gerados dos headers via libclang com a mesma allowlist do prebuilt
+      #   (CPL|CSL|GDAL|OGR|OSR|OCT|VSI). GDAL_VERSION env não é usado nesse
+      #   caminho (só alimentaria a escolha do prebuilt) — pkg-config resolve
+      #   versão e flags do gdal-sys automaticamente.
       #   - NÃO fixamos gdal@<versão>: não existe fórmula versionada de gdal
       #     no homebrew-core (gdal@3.12 não existe).
-      #   - NÃO habilitamos a feature "bindgen" do crate gdal: mais lento e
-      #     mais frágil (exigiria LIBCLANG_PATH=$(brew --prefix llvm)/lib e
-      #     llvm extra). GDAL_VERSION env não é usado no macOS (pkg-config
-      #     resolve versão e flags do gdal-sys automaticamente).
-      #   - Se o brew subir p/ >3.12, o build falha NO build.rs do gdal-sys
-      #     com erro explícito de versão sem binding — plano B documentado:
-      #     habilitar feature bindgen do gdal + LIBCLANG_PATH do llvm do brew.
+      #   - Build restrito a `-p ta-gui -p ta-cli`: os DOIS pacotes que
+      #     dependem de ta-gis e geram os binários da release (curupira-gis,
+      #     ta-cli); o resto do workspace é lib e compila como dependência.
+      #   - Libclang: runners macOS têm Xcode CLT e o clang-sys normalmente
+      #     encontra. Se o build do bindgen reclamar de libclang, descomente o
+      #     step de fallback abaixo (brew llvm + LIBCLANG_PATH).
       - name: GDAL via Homebrew (pkg-config resolve p/ gdal-sys)
         run: |
           brew install gdal pkg-config
           echo "brew GDAL: $(pkg-config --modversion gdal) em $(brew --prefix gdal)"
-          if pkg-config --modversion gdal | awk -F. '{exit !($1>3 || ($1==3 && $2>12))}'; then
-            echo "::warning::GDAL > 3.12 — gdal-sys 0.12 não tem binding pré-gerado; ver DECISÃO acima (plano B: feature bindgen)"
-          fi
 
-      - name: Build release
-        run: cargo build --release --workspace
+      # Fallback p/ bindgen (SÓ descomente se o step "Build release" falhar com
+      # erro de libclang do clang-sys — ex.: "unable to find libclang"):
+      # - name: Libclang do Homebrew (fallback do bindgen)
+      #   run: |
+      #     brew install llvm
+      #     echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
+      - name: Build release (bindgen p/ GDAL sem binding pré-gerado)
+        run: cargo build --release -p ta-gui -p ta-cli --features ta-gis/bindgen-gdal
 
       - name: Bundle CurupiraGIS.app + zip (otool walk, @rpath, re-sign ad-hoc)
         # O bundle.sh faz: Contents/{MacOS,Resources,Frameworks} + Info.plist,

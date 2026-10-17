@@ -27,6 +27,15 @@ percent-encoding = { workspace = true, optional = true }
 [features]
 default = []
 gdal = ["dep:gdal"]
+# Bindings do gdal-sys gerados NO build (bindgen + libclang) em vez dos
+# pré-gerados. Necessário quando o GDAL do sistema excede 3.12 — última
+# versão com binding pré-gerado no gdal-sys 0.12 (prebuilt-bindings/3_4..3_12;
+# run #3 da release: brew GDAL 3.13 → panic "No pre-built bindings"). O crate
+# gdal 0.19 reexporta a feature p/ o gdal-sys: `gdal/bindgen` →
+# `gdal-sys/bindgen` (verificado em gdal-0.19.0/Cargo.toml, seção [features]);
+# habilitar `dep_name/feature` ativa o dep opcional implicitamente (cargo).
+# Libclang em runtime: clang-sys (build-dep opcional `bindgen` do gdal-sys).
+bindgen-gdal = ["gdal/bindgen"]
 geojson = ["dep:geojson"]
 csv = ["dep:csv"]
 # geozero é usado junto do flatgeobuf (escrita FGB via processadores geozero);
