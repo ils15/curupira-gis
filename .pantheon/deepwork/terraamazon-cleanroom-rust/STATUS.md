@@ -680,4 +680,92 @@ contratos do gdal-sys 0.12 + a dylib conda real (inspecionada aqui mesmo).
 3. `.pantheon/deepwork/terraamazon-cleanroom-rust/STATUS.md` — esta seção
    (run #4)
 
+### Run #5 — release (tag v0.1.4-alpha, commit `0c295fa`, 2026-10-17): macOS falhou no codesign final
+
+| Job | Resultado |
+|-----|-----------|
+| `build-linux` | ✅ verde (tar.gz + .deb) |
+| `build-windows` | ✅ verde (zip + instalador Inno Setup — fix ISCC da run #4 confirmado) |
+| `sbom` | ✅ verde |
+| `build-macos` | ❌ step "Bundle CurupiraGIS.app + zip" (job `117363584508`) |
+| `release` (draft) | ⏭️ pulado (`needs` reprovado) |
+
+#### Causa raiz — codesign: dados do PROJ/GDAL sob Contents/MacOS
+
+Log do job: o bundle montou tudo (36 dylibs re-assinadas, binários com
+`@rpath` reescrito, `dados bundled: .../MacOS/share/proj|gdal` copiados) e o
+sign do executável principal explodiu:
+
+```
+dist/CurupiraGIS.app/Contents/MacOS/curupira-gis: replacing existing signature
+dist/CurupiraGIS.app/Contents/MacOS/curupira-gis: code object is not signed at all
+In subcomponent: .../CurupiraGIS.app/Contents/MacOS/share/proj/nad83
+##[error]Process completed with exit code 1.
+```
+
+Mecânica: ao assinar o executável de `Contents/MacOS` com `Info.plist` irmão,
+o codesign enumera o código aninhado do bundle — e **TODO arquivo sob
+`Contents/MacOS` é tratado como código**. Os dados do PROJ/GDAL copiados para
+`MacOS/share` (decisão da run #4) viraram "subcomponentes" não-assinados →
+`code object is not signed at all`. O sign do `ta-cli` (linha seguinte do
+script) nunca rodou — o `set -e` matou o step na re-assinatura do `curupira-gis`.
+
+**Fix (2 partes acopladas):**
+
+1. `packaging/macos/bundle.sh`:
+   - dados `share/{proj,gdal}` migram de `Contents/MacOS/share` →
+     `Contents/Resources/share` (padrão .app: código em MacOS/, dados em
+     Resources; Resources é selado no CodeResources como recurso — sem
+     assinatura);
+   - ordem de assinatura explícita: (a) cada dylib de Frameworks (ad-hoc,
+     já existia), (b) `ta-cli`, (c) `curupira-gis` (main exe é o ÚLTIMO
+     código assinado — a enumeração disparada no sign dele só encontra
+     assinaturas válidas), (d) POR ÚLTIMO o bundle inteiro **sem `--deep`**
+     (`codesign --force --sign - dist/CurupiraGIS.app` — sela Resources e
+     valida o aninhado já assinado; `--deep` não existia no script e segue
+     proibido: re-assinaria tudo e mascararia regressão de ordem).
+2. `crates/ta-gui/src/main.rs` — `use_bundled_gdal_data()`: mantém
+   `<exe_dir>/share/{proj,gdal}` como 1ª escolha (Windows `.iss` instala em
+   `{app}\share`; tar.gz Linux ao lado do binário — **intactos**) e adiciona
+   fallback `<exe_dir>/../Resources/share/{proj,gdal}` para o bundle macOS.
+   Resolver extraído p/ `bundled_data_dir()` + teste unitário novo
+   (`resolver_prefere_share_e_cai_para_resources` — prova as duas bases).
+
+#### Verificação local (host Linux, 2026-10-17)
+
+| Check | Resultado |
+|-------|-----------|
+| `bash -n packaging/macos/bundle.sh` | ✅ |
+| pyyaml `release.yml` (comentário atualizado p/ Resources) | ✅ |
+| `cargo build --workspace` | ✅ |
+| `cargo test --workspace` (RUSTFLAGS=-D warnings) | ✅ 137 passed / 0 failed (inclui o novo teste do resolver) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo fmt -p ta-gui -- --check` | ✅ |
+
+Limitação honesta: codesign/enumeração de bundle só existem em runner macOS —
+a prova real é a run #6.
+
+#### O que a run #6 vai provar (simulação mental, evidências da run #5)
+
+1. `dados bundled: .../Contents/Resources/share/proj|gdal` no log (antes:
+   `.../MacOS/share/proj|gdal`) — nenhum dado sob MacOS/.
+2. Sequência de signs sem erro: 36× dylibs → `ta-cli` → `curupira-gis` →
+   `CurupiraGIS.app` (a run #5 morreu ANTES do sign do `ta-cli`; se a
+   enumeração do main exe achar só assinaturas válidas + Resources selados,
+   passa).
+3. Zip `CurupiraGIS-macos-arm64.zip` com `Contents/_CodeSignature/CodeResources`
+   (novo — o sign do bundle cria) e sem `Contents/MacOS/share`.
+4. Draft release criado com os 5 entregáveis (macOS era o único faltante —
+   windows/linux/sbom já verdes na run #5 e os jobs não dependem do fix).
+
+#### Arquivos p/ @iris (commit único, NÃO pushado ainda; tag sugerida `v0.1.5-alpha`)
+
+1. `packaging/macos/bundle.sh` — dados em Resources + ordem de codesign sem `--deep`
+2. `crates/ta-gui/src/main.rs` — fallback `../Resources/share` + teste do resolver
+3. `.github/workflows/release.yml` — só comentário (documenta o destino Resources)
+4. `.pantheon/deepwork/terraamazon-cleanroom-rust/STATUS.md` — esta seção (run #5)
+
+Push em `main` + tag `v0.1.5-alpha` → dispara a run #6 (workflow: `on: push: tags: ["v*"]`).
+
+
 

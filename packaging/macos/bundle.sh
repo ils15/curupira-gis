@@ -19,13 +19,20 @@
 #      dependências já-@rpath (conda) mantêm o nome — o basename em
 #      Frameworks é o mesmo e o LC_RPATH do executável resolve. Executáveis
 #      ganham LC_RPATH @executable_path/../Frameworks
-#   5. Re-assina ad-hoc (codesign -f -s -) tudo que foi alterado — OBRIGATÓRIO
+#   5. Copia dados de runtime GDAL/PROJ do prefixo do build ($GDAL_HOME/share,
+#      layout conda) p/ Contents/Resources/share — NUNCA p/ MacOS/: o codesign
+#      trata TODO arquivo sob Contents/MacOS como código e o sign do bundle
+#      falha em dado não-assinado ("code object is not signed at all"; run #5:
+#      Contents/MacOS/share/proj/nad83). Dados em Resources são selados no
+#      CodeResources como recursos — sem assinatura. O ta-gui (main.rs)
+#      resolve <dir-do-exe>/share e cai p/ <dir-do-exe>/../Resources/share.
+#   6. Re-assina ad-hoc (codesign -f -s -) na ordem OBRIGATÓRIA — OBRIGATÓRIO
 #      no arm64: o linker assina ad-hoc na build, mas install_name_tool
 #      INVALIDA a assinatura e o macOS se recusa a carregar o binário
-#      ("code signature invalid") sem re-assinatura.
-#   6. Copia dados de runtime GDAL/PROJ do prefixo do build ($GDAL_HOME/share,
-#      layout conda) p/ Contents/MacOS/share — o ta-gui (main.rs) aponta
-#      PROJ_LIB/GDAL_DATA p/ <dir-do-exe>/share quando existir
+#      ("code signature invalid") sem re-assinatura. Ordem: (a) cada dylib de
+#      Frameworks, (b) cada executável de MacOS/ (ta-cli antes do main exe),
+#      (c) POR ÚLTIMO o bundle inteiro SEM --deep — o sign externo valida o
+#      código aninhado (todos já assinados) e sela Resources no CodeResources.
 #   7. Zipa com ditto (CurupiraGIS-macos-arm64.zip)
 #
 # DECISÃO (não usar DYLD_LIBRARY_PATH): wrapper com DYLD_* é frágil (variáveis
@@ -192,27 +199,42 @@ for exe in "$MACOS/curupira-gis" "$MACOS/ta-cli"; do
 done
 
 # --- dados de runtime GDAL/PROJ (consumidos por ta-gui/src/main.rs) ----------
-# main.rs aponta PROJ_LIB/GDAL_DATA p/ <dir-do-exe>/share/{proj,gdal} quando
-# existirem; no bundle, dir-do-exe = Contents/MacOS. Origem: o MESMO prefixo
-# usado no build ($GDAL_HOME, layout conda). Sem $GDAL_HOME (dev com brew) →
-# skip: comportamento idêntico ao Linux (sem dados bundled, PROJ/GDAL do
-# sistema). Falha na cópia = erro (set -e), nunca bundle pela metade.
+# main.rs aponta PROJ_LIB/GDAL_DATA p/ <dir-do-exe>/share/{proj,gdal} e, no
+# bundle macOS, cai p/ <dir-do-exe>/../Resources/share — POR ISSO os dados
+# vivem em Contents/Resources/share (padrão .app: código em MacOS/, dados em
+# Resources/). Origem: o MESMO prefixo usado no build ($GDAL_HOME, layout
+# conda). Sem $GDAL_HOME (dev com brew) → skip: comportamento idêntico ao
+# Linux (sem dados bundled, PROJ/GDAL do sistema). Falha na cópia = erro
+# (set -e), nunca bundle pela metade.
 if [ -n "${GDAL_HOME:-}" ]; then
   for d in proj gdal; do
     if [ -d "$GDAL_HOME/share/$d" ]; then
-      mkdir -p "$MACOS/share"
-      cp -R "$GDAL_HOME/share/$d" "$MACOS/share/$d"
-      echo "dados bundled: $MACOS/share/$d <- $GDAL_HOME/share/$d"
+      mkdir -p "$RESOURCES/share"
+      cp -R "$GDAL_HOME/share/$d" "$RESOURCES/share/$d"
+      echo "dados bundled: $RESOURCES/share/$d <- $GDAL_HOME/share/$d"
     fi
   done
 fi
 
 # --- re-assinatura ad-hoc (obrigatória pós-install_name_tool no arm64) -------
+# ORDEM OBRIGATÓRIA (run #5): ao assinar um executável de Contents/MacOS com
+# Info.plist irmão, o codesign valida o código aninhado do bundle — e TODO
+# arquivo sob MacOS/ é tratado como código (o dado MacOS/share/proj/nad83
+# virou "code object is not signed at all", In subcomponent). Garantias:
+#   (a) NENHUM dado sob MacOS/ (Resources/share acima);
+#   (b) dylibs de Frameworks re-assinadas antes de qualquer sign de MacOS/;
+#   (c) executáveis de MacOS/ re-assinados: ta-cli PRIMEIRO — o main exe é o
+#       último código a levar sign, então a enumeração do bundle (disparada
+#       no sign dele) só encontra assinaturas válidas;
+#   (d) POR ÚLTIMO o bundle inteiro SEM --deep: sela Resources/** no
+#       CodeResources e valida o aninhado já assinado. --deep re-assinaria
+#       tudo (mascara regressão de ordem) — proibido aqui.
 while IFS= read -r dylib; do
   codesign --force --sign - "$dylib"
 done < <(find "$FRAMEWORKS" -type f -name "*.dylib")
-codesign --force --sign - "$MACOS/curupira-gis"
 codesign --force --sign - "$MACOS/ta-cli"
+codesign --force --sign - "$MACOS/curupira-gis"
+codesign --force --sign - "$OUT_DIR/$APP"
 
 # --- zip (ditto preserva metadados; -k = pkzip) ------------------------------
 ditto -c -k --sequesterRsrc --keepParent "$OUT_DIR/$APP" "$ZIP"
