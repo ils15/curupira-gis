@@ -35,6 +35,7 @@ env:
 #   actions/cache@v6.1.0
 #   actions/upload-artifact@v4.6.1
 #   actions/download-artifact@v4.3.0
+#   mamba-org/setup-micromamba@v1 (objeto da tag v1 em 2026-10-17; job macOS)
 
 jobs:
   build-linux:
@@ -220,16 +221,28 @@ jobs:
       #   3. registry (uninstall keys com DisplayName "Inno Setup*") → InstallLocation
       #   4. tools do pacote choco: C:\ProgramData\chocolatey\lib\innosetup\tools\**\ISCC.exe
       #   5. último recurso: `choco install innosetup` e re-derivar do (4)
+      # Run #4 (root cause do ítem 1): pipeline `@(...) | Where-Object` com
+      # EXATAMENTE 1 match sofre unroll do PowerShell — `$std` vira STRING e
+      # `$std[0]` devolve o 1º CARACTERE ("C") em vez do caminho. ISCC_PATH="C"
+      # → `Split-Path "C"` = vazio → `Join-Path` explode ("Cannot bind
+      # argument to parameter 'Path'") → exit 1 (log da run: "ISCC real: C").
+      # Correção: `Select-Object -First 1` fecha o pipeline e `return $std`
+      # (sem indexação) preserva escalar OU array; asserção `Test-Path`
+      # antes de exportar GITHUB_ENV converte qualquer regressão futura em
+      # erro explícito no lugar certo.
       - name: Localiza ISCC.exe real (Inno Setup 6) — nunca o shim do choco
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           function Find-ISCC {
+            # Select-Object -First 1 + return sem indexação: o pipeline pode
+            # entregar escalar (1 match → unroll) e `$std[0]` numa STRING
+            # devolve um caractere — bug da run #4. Ver comentário do step.
             $std = @(
               (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
               (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
-            ) | Where-Object { $_ -and (Test-Path $_) }
-            if ($std) { return $std[0] }
+            ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+            if ($std) { return $std }
 
             $uninstKeys = @(
               'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
@@ -262,6 +275,11 @@ jobs:
           }
 
           $isccPath = Find-ISCC
+          # Assegura que veio um caminho REAL (protege o GITHUB_ENV contra
+          # qualquer regressão de captura do Find-ISCC — run #4: ISCC_PATH="C").
+          if (-not $isccPath -or -not (Test-Path $isccPath)) {
+            throw "Find-ISCC retornou caminho inválido: '$isccPath' — esperado ISCC.exe existente."
+          }
           Write-Host "ISCC real: $isccPath"
           "ISCC_PATH=$isccPath" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
 
@@ -316,7 +334,7 @@ jobs:
           if-no-files-found: error
 
   build-macos:
-    name: macos arm64 (CurupiraGIS.app zip, GDAL via Homebrew)
+    name: macos arm64 (CurupiraGIS.app zip, GDAL 3.12 conda-forge)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -324,42 +342,76 @@ jobs:
       - name: Instala toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
-      # DECISÃO GDAL/macOS (revisada 2026-10-17 pós-run #3, @prometheus):
-      #   caminho escolhido = brew gdal CORRENTE + bindings GERADOS NO BUILD
-      #   (feature `bindgen` do gdal-sys via `bindgen-gdal` do ta-gis).
-      #   Run #3 provou o teto do plano antigo (bindings pré-gerados): o brew
-      #   subiu p/ GDAL 3.13 e o gdal-sys 0.12 só embute bindings até 3.12
-      #   (prebuilt-bindings/3_4..3_12) → panic no build.rs:282 ("No pre-built
-      #   bindings available for GDAL version 3.13") — exatamente o ::warning
-      #   previsto no step antigo.
-      #   - gdal/bindgen → gdal-sys/bindgen (reexport confirmado no Cargo.toml
-      #     do gdal 0.19). Com bindgen NÃO há teto de versão: os bindings são
-      #   gerados dos headers via libclang com a mesma allowlist do prebuilt
-      #   (CPL|CSL|GDAL|OGR|OSR|OCT|VSI). GDAL_VERSION env não é usado nesse
-      #   caminho (só alimentaria a escolha do prebuilt) — pkg-config resolve
-      #   versão e flags do gdal-sys automaticamente.
-      #   - NÃO fixamos gdal@<versão>: não existe fórmula versionada de gdal
-      #     no homebrew-core (gdal@3.12 não existe).
-      #   - Build restrito a `-p ta-gui -p ta-cli`: os DOIS pacotes que
-      #     dependem de ta-gis e geram os binários da release (curupira-gis,
-      #     ta-cli); o resto do workspace é lib e compila como dependência.
-      #   - Libclang: runners macOS têm Xcode CLT e o clang-sys normalmente
-      #     encontra. Se o build do bindgen reclamar de libclang, descomente o
-      #     step de fallback abaixo (brew llvm + LIBCLANG_PATH).
-      - name: GDAL via Homebrew (pkg-config resolve p/ gdal-sys)
+      # DECISÃO GDAL/macOS (revisada 2026-10-17 pós-run #4, @prometheus):
+      #   caminho escolhido = GDAL 3.12.x do conda-forge via micromamba,
+      #   bindings PRÉ-GERADOS 3_12 (sem bindgen). RISCO NOS DOIS PLANOS
+      #   ANTERIORES:
+      #   - Run #3 (prebuilt + brew): brew subiu p/ GDAL 3.13 → panic no
+      #     build.rs:282 ("No pre-built bindings available for GDAL 3.13").
+      #   - Run #4 (bindgen + brew 3.13): os bindings geraram, mas o WRAPPER
+      #     safe do gdal 0.19 quebrou contra a API C 3.13 — E0425
+      #     `cannot find value GDT_Byte` (types.rs:35 e :342) e E0063
+      #     `missing field bOperateInBufType` (rasterband.rs:282). Bindgen
+      #     resolve o teto de versão dos bindings, mas NÃO a compatibilidade
+      #     do wrapper: a caixa do crate é 3.12.
+      #   Consequência: fixar o GDAL em 3.12.x — e como o homebrew-core não
+      #   tem fórmula versionada de gdal, a fonte do 3.12 determinístico é o
+      #   conda-forge (builds 3.12.* estáveis, pkg-config/gdal-config/dylibs
+      #   no mesmo prefixo).
+      #   - setup-micromamba PINADO por SHA do objeto da tag v1 (4b9113af…,
+      #     API GitHub 2026-10-17).
+      #   - create-args pina MINOR (3.12.*): qualquer 3.12.x casa com o
+      #     prebuilt-bindings/3_12 do gdal-sys 0.12 (seleção por major.minor,
+      #     build.rs:277). Assert abaixo falha rápido em versão inesperada.
+      #   - build.rs do gdal-sys 0.12 (lido no registry, seções unix): com
+      #     GDAL_HOME setado, link vem de $GDAL_HOME/lib
+      #     (rustc-link-search direto, metadata do pkg-config desligada) e o
+      #     pkg-config serve SÓ p/ detectar a versão → PKG_CONFIG/PKG_CONFIG_
+      #     PATH apontam pro binário/.pc do próprio env (determinístico,
+      #     independe do PATH do runner).
+      #   - Feature `ta-gis/bindgen-gdal` FICA no Cargo.toml (útil quando o
+      #     gdal 0.20 suportar 3.13+) mas NÃO é usada neste job.
+      #   - Bundle: packaging/macos/bundle.sh resolve os @rpath do conda
+      #     (install names `@rpath/libgdal.38.dylib` confirmados na dylib
+      #     3.12.4 osx-arm64 do conda-forge) via $GDAL_HOME/lib e copia
+      #     share/proj + share/gdal do prefixo p/ Contents/MacOS/share.
+      - name: GDAL 3.12 (conda-forge via micromamba; brew abandonado na run #4)
+        id: gdalenv
+        uses: mamba-org/setup-micromamba@4b9113af4fba0e9e1124b252dd6497a419e7396d # v1 (objeto da tag v1)
+        with:
+          environment-name: gdal
+          create-args: >-
+            -c conda-forge
+            gdal=3.12.*
+            pkg-config
+
+      - name: Exporta GDAL_HOME/PKG_CONFIG e assert versão 3.12.x
         run: |
-          brew install gdal pkg-config
-          echo "brew GDAL: $(pkg-config --modversion gdal) em $(brew --prefix gdal)"
+          GDAL_HOME="${{ steps.gdalenv.outputs.environment-path }}"
+          [ -n "$GDAL_HOME" ] || { echo "::error::environment-path vazio — env conda não criado?"; exit 1; }
+          [ -x "$GDAL_HOME/bin/gdal-config" ] || { echo "::error::gdal-config ausente em $GDAL_HOME — pacote gdal incompleto"; exit 1; }
+          [ -f "$GDAL_HOME/lib/pkgconfig/gdal.pc" ] || { echo "::error::gdal.pc ausente em $GDAL_HOME/lib/pkgconfig"; exit 1; }
+          {
+            echo "GDAL_HOME=$GDAL_HOME"
+            echo "PKG_CONFIG_PATH=$GDAL_HOME/lib/pkgconfig"
+            echo "PKG_CONFIG=$GDAL_HOME/bin/pkg-config"
+          } >> "$GITHUB_ENV"
+          v="$("$GDAL_HOME/bin/pkg-config" --modversion gdal)"
+          case "$v" in
+            3.12.*)
+              echo "conda-forge GDAL $v em $GDAL_HOME — prebuilt bindings 3_12 do gdal-sys"
+              ;;
+            *)
+              echo "::error::GDAL inesperado: $v (esperado 3.12.*; pin do conda = gdal=3.12.*)"
+              exit 1
+              ;;
+          esac
 
-      # Fallback p/ bindgen (SÓ descomente se o step "Build release" falhar com
-      # erro de libclang do clang-sys — ex.: "unable to find libclang"):
-      # - name: Libclang do Homebrew (fallback do bindgen)
-      #   run: |
-      #     brew install llvm
-      #     echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
-
-      - name: Build release (bindgen p/ GDAL sem binding pré-gerado)
-        run: cargo build --release -p ta-gui -p ta-cli --features ta-gis/bindgen-gdal
+      - name: Build release (prebuilt bindings 3_12 — sem bindgen)
+        # Restrito a `-p ta-gui -p ta-cli`: os DOIS pacotes que dependem de
+        # ta-gis e geram os binários da release (curupira-gis, ta-cli); o
+        # resto do workspace é lib e compila como dependência.
+        run: cargo build --release -p ta-gui -p ta-cli
 
       - name: Bundle CurupiraGIS.app + zip (otool walk, @rpath, re-sign ad-hoc)
         # O bundle.sh faz: Contents/{MacOS,Resources,Frameworks} + Info.plist,

@@ -554,3 +554,130 @@ alcançáveis por features do workspace p/ resolução offline posterior. Sem
 4. Este STATUS.md foi atualizado **localmente após o push** — a versão publicada no repo está desatualizada; publicá-la exige um segundo commit (aguardando instrução).
 5. **Commitar e pushar as correções da 1ª run** (3 arquivos: `ci.yml`, `release.yml`, `mvt_integration.rs` + este STATUS.md) — @iris. A 2ª run de CI é a prova das correções; se o job windows avançar do `vcpkg install`, monitorar o **link** do gdal-sys e a extração de `GDAL_VERSION` (regex endurecida p/ ambos os formatos de `vcpkg list`).
 
+### Run #4 — release (tag, 2026-10-17): macOS + Windows falharam (fix local, aguardando commit)
+
+Run [39019341582](https://api.github.com/repos/ils15/curupira-gis/actions/runs/39019341582):
+
+| Job | Resultado |
+|-----|-----------|
+| `build-linux` | ✅ verde |
+| `sbom` | ✅ verde |
+| `build-windows` | ❌ exit 1 no step "Compila instalador (Inno Setup)" — **build do cargo passou** (GDAL 3.12.4 via vcpkg, `GDAL_VERSION: 3.12.4` no log) |
+| `build-macos` | ❌ exit 101 compilando o crate `gdal` 0.19 (wrapper safe) |
+| `release` (draft) | ⏭️ pulado (`needs` reprovado) |
+
+#### Causa 1 — macOS: bindgen gerou os bindings, mas o WRAPPER do gdal 0.19 não suporta GDAL 3.13
+
+Log do job (linhas citadas do `jobs/117357839527/logs`):
+
+- `error[E0425]: cannot find value GDT_Byte in module GDALDataType` →
+  `gdal-0.19.0/src/raster/types.rs:35` e `:342`;
+- `error[E0063]: missing field bOperateInBufType in initializer of GDALRasterIOExtraArg` →
+  `gdal-0.19.0/src/raster/rasterband.rs:282`;
+- `error: could not compile gdal (lib) due to 3 previous errors` → exit 101.
+
+Ou seja: o bindgen cumpriu o papel dele (bindings geraram da API C 3.13), mas
+o **wrapper safe** do crate (tipos/enum de raster) ainda espera a superfície
+3.12 — o problema não é só "teto dos bindings", é **compat do wrapper**. A
+alternativa bindgen (run #3→#4) está descartada enquanto o gdal-rs não
+declarar 3.13.
+
+**Fix (decidido, aplicado no `release.yml` job `build-macos`):** GDAL
+**3.12.x do conda-forge** via micromamba — pin determinístico que casa com os
+prebuilt-bindings `3_12` (e com o wrapper do gdal 0.19). Brew abandonado
+(não existe `gdal@3.12` versionado no homebrew-core):
+
+1. `mamba-org/setup-micromamba@4b9113af4fba0e9e1124b252dd6497a419e7396d` —
+   SHA do **objeto da tag `v1`** consultado na API GitHub em 2026-10-17
+   (`git/refs/tags/v1` → `4b9113af4fba0e9e1124b252dd6497a419e7396d`, type
+   commit; registrado no comentário do YAML). `create-args`: `-c conda-forge
+   gdal=3.12.* pkg-config` (pin de **minor**: qualquer 3.12.x casa com
+   `prebuilt-bindings/3_12` — seleção por major.minor, build.rs:277 do
+   gdal-sys).
+2. Step "Exporta GDAL_HOME/PKG_CONFIG e assert versão 3.12.x": usa o output
+   `environment-path` do action (prefixo real do env, sem depender de
+   `CONDA_PREFIX`/`MICROMAMBA_ROOTPREFIX`), exporta `GDAL_HOME`,
+   `PKG_CONFIG_PATH=$GDAL_HOME/lib/pkgconfig` e `PKG_CONFIG=$GDAL_HOME/bin/
+   pkg-config`, valida existência de `gdal-config`/`gdal.pc` e **asserta**
+   `pkg-config --modversion gdal` ∈ `3.12.*` (falha rápida com
+   `::error::` se o solver entregar outra coisa). Contratos do build.rs do
+   gdal-sys 0.12 verificados no fonte do registry (`~/.cargo/registry/src/
+   …/gdal-sys-0.12.*/build.rs`): com `GDAL_HOME` setado o link sai de
+   `$GDAL_HOME/lib` (`rustc-link-search`, metadata do pkg-config desligada)
+   e o pkg-config serve só p/ detectar a versão → `PKG_CONFIG`+`PKG_CONFIG_
+   PATH` explícitos tornam a detecção independente do PATH do runner.
+3. Build sem bindgen: `cargo build --release -p ta-gui -p ta-cli` (a feature
+   `ta-gis/bindgen-gdal` **fica** no `Cargo.toml` — útil quando o gdal-rs
+   suportar 3.13+).
+4. `packaging/macos/bundle.sh` adaptado (_dylib inspection real_: baixado o
+   `libgdal-core-3.12.4` osx-arm64 do conda-forge — `LC_ID_DYLIB =
+   @rpath/libgdal.38.dylib` e **32 deps todas `@rpath/`**; o antigo
+   `case @*) continue` pularia tudo e o .app sairia quebrado):
+   - novo `resolve_dep()`: caminho absoluto passa direto (brew); `@rpath/…`
+     é resolvido contra (1) `LC_RPATH` do referenciador (novo
+     `list_rpaths()` via `otool -l`), (2) `$GDAL_HOME/lib` (conda — todas as
+     dylibs do env), (3) `/opt/homebrew/lib`, `/usr/local/lib`; não achou =
+     **erro explícito** (nunca bundle pela metade);
+   - `fix_deps()`: `-change` só em dependência absoluta; deps `@rpath/…`
+     ficam como estão (basename em Frameworks é idêntico; dyld resolve via
+     `LC_RPATH @executable_path/../Frameworks` do executável — vale p/ todo
+     o link chain);
+   - novo bloco final: copia `$GDAL_HOME/share/{proj,gdal}` →
+     `Contents/MacOS/share/` (o `ta-gui/src/main.rs` — `use_bundled_gdal_
+     data()` — aponta PROJ_LIB/GDAL_DATA p/ `<dir-do-exe>/share`; sem isso
+     o .app abriria sem proj.db/dados GDAL);
+   - re-assinatura ad-hoc já existente cobre as novas libs (todas passam por
+     `install_name_tool`).
+   Risco documentado no YAML: dylibs do conda + codesign ad-hoc — já
+   tratado pelo re-sign; `@rpath` agora bate com a origem conda.
+
+#### Causa 2 — Windows: unroll de pipeline do PowerShell corrompeu o ISCC_PATH
+
+Descartado por evidência de log: **não** foi vcpkg/GDAL (caso (a) — o cargo
+build completou e `GDAL_VERSION: 3.12.4`; bindgen no windows não é preciso)
+nem regex do `vcpkg list` (caso (c) — a versão foi extraída corretamente).
+Log do job (`jobs/117357839683/logs`):
+
+- `ISCC real: C` (o `Find-ISCC` devolveu o **caractere** "C");
+- env dump do step seguinte: `ISCC_PATH: C`;
+- `Join-Path: ... Line | 25 | $langsDir = Join-Path (Split-Path
+  $env:ISCC_PATH) "Languages" ... Cannot bind argument to parameter 'Path'
+  because it is an empty string.` → `ErrorActionPreference='Stop'` → exit 1;
+- o step durou 0,38 s (o caminho choco nem rodou) → a origem foi o ramo
+  rápido `%ProgramFiles(x86)%` (Inno Setup 6 **é** pré-instalado no runner).
+
+Root cause: `@(…, …) | Where-Object {…}` com **exatamente 1 match** sofre
+*unroll* — `$std` vira **string** (não array) e `$std[0]` indexa o 1º
+CARACTERE de `C:\Program Files (x86)\Inno Setup 6\ISCC.exe` → `"C"`.
+
+**Fix (step "Localiza ISCC.exe real"):** `Select-Object -First 1` fecha o
+pipeline e `return $std` sem indexação (escalar OU array ok, mesmo nos
+ramos registry/choco); asserção `Test-Path $isccPath` antes de exportar
+`GITHUB_ENV` transforma qualquer regressão futura em erro explícito no step
+certo (em vez de `ISCC_PATH` podre explodindo 2 steps adiante).
+
+#### Verificação local (host Linux, 2026-10-17)
+
+| Check | Resultado |
+|-------|-----------|
+| pyyaml `release.yml` + `ci.yml` | ✅ (jobs: 5 e 3, estrutura íntegra) |
+| `bash -n packaging/macos/bundle.sh` | ✅ |
+| `cargo build --workspace --offline` | ✅ 1,7s (cache quente) |
+| Windows caso (a)? | ❌ **não se aplica** — o build cargo passou no CI; a falha era o ISCC (caso (b), causa nova). Sem necessidade de re-prova do `bindgen-gdal` no windows |
+| Sintaxe PowerShell dos steps Windows | ⚠️ revisão manual (pwsh não existe no host; pyyaml valida o YAML) |
+
+Limitação honesta: os caminhos macOS (micromamba/conda) e o resolver de
+`@rpath` do bundle.sh rodam **só em runners macOS** — a prova real é a run
+#5. No host Linux verificou-se: YAML, sintaxe bash, build do workspace e os
+contratos do gdal-sys 0.12 + a dylib conda real (inspecionada aqui mesmo).
+
+#### Arquivos p/ @iris (commit único, NÃO pushado ainda)
+
+1. `.github/workflows/release.yml` — job macOS (micromamba/conda-forge 3.12,
+   sem bindgen, asserts) + fix ISCC do windows (unroll + asserção)
+2. `packaging/macos/bundle.sh` — resolver `@rpath`/origem-agnóstico + dados
+   `share/{proj,gdal}` no bundle
+3. `.pantheon/deepwork/terraamazon-cleanroom-rust/STATUS.md` — esta seção
+   (run #4)
+
+
