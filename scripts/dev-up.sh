@@ -32,6 +32,13 @@ cd "$ROOT"
 log() { printf '[dev-up] %s\n' "$*"; }
 die() { printf '[dev-up] ERRO: %s\n' "$*" >&2; exit 1; }
 
+# Mascara a senha de um DSN para **exibição** (postgres://user:senha@host →
+# postgres://user:***@host). DSNs sem senha (ou em formato keyword=value)
+# passam intocados. O valor real NUNCA é mascarado nos `export` de ambiente.
+mask_dsn() {
+    printf '%s' "$1" | sed -E 's#(://[^:/@]+):[^@/]*@#\1:***@#'
+}
+
 usage() {
     sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
@@ -138,7 +145,7 @@ fi
 export TA_PG_DSN="$DSN"
 export TA_DATABASE_URL="$DSN" # a GUI pré-preenche o diálogo de conexão com ela
 log "banco: $HOW"
-log "dsn:   $DSN"
+log "dsn:   $(mask_dsn "$DSN")"
 
 # --- 2) CLI -----------------------------------------------------------------
 CLI="${TA_CLI_BIN:-$ROOT/target/debug/ta-cli}"
@@ -172,11 +179,11 @@ if [ "$OPEN_GUI" = 1 ]; then
         exec cargo run -p ta-gui --quiet
     fi
     log "AVISO: sem DISPLAY/WAYLAND_DISPLAY neste host — não consigo abrir a GUI aqui."
-    log "  num host com display: TA_DATABASE_URL='$DSN' cargo run -p ta-gui"
+    log "  num host com display: TA_DATABASE_URL='$(mask_dsn "$DSN")' cargo run -p ta-gui"
 fi
 
 log "pronto. ambiente validado (doctor exit 0) e projeto \`demo\` semeado."
-log "  GUI:  TA_DATABASE_URL='$DSN' cargo run -p ta-gui   (Conectar → Ctrl+O → \`demo\`)"
+log "  GUI:  TA_DATABASE_URL='$(mask_dsn "$DSN")' cargo run -p ta-gui   (Conectar → Ctrl+O → \`demo\`)"
 if [ -n "$STOP_HINT" ]; then
     log "  banco: $STOP_HINT"
 fi

@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use ta_db::pool::{self, DbConfig};
@@ -36,13 +36,25 @@ fn resolve_dsn(dsn: Option<&str>) -> String {
         .unwrap_or_else(|| DbConfig::default().url)
 }
 
-async fn open_pool(dsn: Option<&str>) -> Result<sqlx::PgPool, String> {
-    let url = resolve_dsn(dsn);
+/// Timeout de aquisição de conexão da CLI: curto de propósito. Com o banco
+/// fora do ar, `migrate`/`seed-demo` (e o resto do CLI) devem falhar em ~5 s,
+/// não nos 30 s do default do sqlx — mesmo racional do `doctor`.
+pub(crate) const CLI_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Abre o pool com o timeout curto da CLI, **sem** tocar no schema — para
+/// chamadores que decidem o setup (ex.: `migrate` lê o estado das migrações
+/// antes de aplicá-las).
+pub(crate) async fn open_pool_raw(url: &str) -> sqlx::Result<sqlx::PgPool> {
     let cfg = DbConfig {
-        url: url.clone(),
+        url: url.to_owned(),
         max_connections: 4,
     };
-    let pool = pool::connect(&cfg)
+    pool::connect_with_timeout(&cfg, CLI_ACQUIRE_TIMEOUT).await
+}
+
+async fn open_pool(dsn: Option<&str>) -> Result<sqlx::PgPool, String> {
+    let url = resolve_dsn(dsn);
+    let pool = open_pool_raw(&url)
         .await
         .map_err(|e| format!("conexão falhou ({}): {e}", dsn::mask_password(&url)))?;
     // Setup idempotente: extensão postgis + migrações (primeiro uso num
@@ -375,4 +387,44 @@ where
     })
     .await
     .map_err(|e| format!("criar projeto `{id_or_name}`: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    use super::*;
+
+    /// `open_pool_raw` (caminho de `migrate`/`seed-demo`/demais) falha rápido
+    /// quando o Postgres não responde: um listener que aceita a conexão TCP
+    /// mas nunca fala o protocolo pendura o cliente no handshake. Sem o
+    /// `CLI_ACQUIRE_TIMEOUT` de 5 s isso travaria os 30 s do default do sqlx.
+    #[tokio::test]
+    async fn pool_falha_rapido_com_host_que_nao_responde() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+        let port = listener.local_addr().expect("local_addr").port();
+        // Aceita e segura a conexão sem responder nada (bloqueia no read).
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 1024];
+                    // Lê o que o cliente mandar mas **nunca responde**: o
+                    // handshake fica pendurado até o timeout do cliente.
+                    while matches!(stream.read(&mut buf), Ok(n) if n > 0) {}
+                });
+            }
+        });
+
+        let dsn = format!("postgres://ta:x@127.0.0.1:{port}/ta");
+        let started = Instant::now();
+        let err = open_pool_raw(&dsn)
+            .await
+            .expect_err("host que não responde deve falhar");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "deve falhar rápido (~5 s), levou {elapsed:?}: {err}"
+        );
+    }
 }

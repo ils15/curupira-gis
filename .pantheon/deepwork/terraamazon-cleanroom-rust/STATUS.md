@@ -1008,11 +1008,11 @@ domain-first**; não substitui nem reescreve o histórico v0.1–v0.2.2 acima.
 ### Decisões registradas (não relitigar)
 
 1. **(1 = a)** Paridade validada **apenas** por **documentação pública +
-   observação comportamental**. **Proibida** engenharia reversa do produto
-   legado. **Todo** o material extraído (app desempacotado 244 MB, schema SQL,
-   help `.qch`, artefatos de análise Ghidra) foi **DELETADO do disco em
-   2026-10-18** por decisão do usuário; nenhum insumo derivado do binário legado
-   entra no repositório (`CONTRIBUTING.md`, linhas 16–29).
+   observação comportamental**. Por política clean-room (`CONTRIBUTING.md`),
+   **proibida** engenharia reversa do produto legado e **todo** o material
+   proibido foi **removido do disco em 2026-10-18** por decisão do usuário;
+   nenhum insumo derivado de engenharia reversa do produto legado entra no
+   repositório.
 2. **(2 = sim)** Nomes de tabela **próprios**, sem prefixo legado: `phases`,
    `aoi_layers`, `cell_layers`, `cells`, `blocked_cells`, `classes`,
    `class_groups`, `rules`, `rulesets`, `tasks`, `processes`, `cell_log`,

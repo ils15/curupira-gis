@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sqlx::PgPool;
-use ta_db::pool::{self, DbConfig};
 use ta_db::spatial::{ensure_postgis, is_postgis_ready, run_migrations};
 
 use crate::dsn::mask_password;
@@ -93,11 +92,7 @@ pub async fn run(args: MigrateArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    let cfg = DbConfig {
-        url: args.to.clone(),
-        max_connections: 4,
-    };
-    let pool = pool::connect(&cfg)
+    let pool = crate::open_pool_raw(&args.to)
         .await
         .map_err(|e| format!("conexão ao destino falhou: {e}"))?;
     check_pg_version(&pool).await?;
@@ -221,11 +216,7 @@ fn sanitize_table_name(stem: &str) -> String {
 /// `ta-cli doctor` confere.
 async fn apply_schema(to: &str, dry_run: bool) -> Result<(), String> {
     println!("migrate: schema-only → destino {}", mask_password(to));
-    let cfg = DbConfig {
-        url: to.to_owned(),
-        max_connections: 4,
-    };
-    let pool = pool::connect(&cfg)
+    let pool = crate::open_pool_raw(to)
         .await
         .map_err(|e| format!("conexão ao destino falhou: {e}"))?;
     check_pg_version(&pool).await?;

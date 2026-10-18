@@ -238,7 +238,7 @@ Todas usam **nomes próprios, sem prefixo legado** (Decisão 2). Geometria em **
 
 | # | Decisão |
 |---|---|
-| **1 (a)** | A paridade é validada **apenas** por **documentação pública + observação comportamental**. É **PROIBIDO** usar engenharia reversa do produto legado. **TODO** o material extraído (app desempacotado de 244 MB, schema SQL, help `.qch`, artefatos de análise Ghidra) foi **DELETADO do disco em 2026-10-18** por decisão do usuário. Nenhum insumo derivado do binário legado pode entrar no repositório (ver `CONTRIBUTING.md`, linhas 16–29). |
+| **1 (a)** | A paridade é validada **apenas** por **documentação pública + observação comportamental**. É **PROIBIDO** usar engenharia reversa do produto legado. Por política clean-room (`CONTRIBUTING.md`), **todo** o material proibido foi **removido do disco em 2026-10-18** por decisão do usuário. Nenhum insumo derivado de engenharia reversa do produto legado pode entrar neste repositório. |
 | **2 (sim)** | **Nomes de tabela próprios**, sem prefixo legado: `phases`, `aoi_layers`, `cell_layers`, `cells`, `blocked_cells`, `classes`, `class_groups`, `rules`, `rulesets`, `tasks`, `processes`, `cell_log`, `draft_layers`, `scenes`, `project_scenes`, `area_settings`, `app_meta`. |
 | **3** | **Motor de domínio em crate NOVO e puro `ta-engine`** — depende **apenas** de `ta-core` + `geo-types`; **sem IO, sem DB, sem GUI**. |
 | **4** | Geometria persistida em **EPSG:4674**; **cálculo de ÁREA** e **definição de RESOLUÇÃO de célula** em **EPSG:5880** (Policônica SIRGAS2000) **ou** `geography`. |

@@ -199,16 +199,26 @@ mod tests {
         assert_eq!(TARGET_SRID, 4674);
     }
 
-    /// As migrações versionadas do crate são 0001..=0004; o doctor depende de
-    /// `local_migration_versions` enxergar exatamente esse conjunto (leitura de
-    /// diretório, sem banco).
+    /// `local_migration_versions` lê `migrations/` sem banco: deve devolver uma
+    /// sequência de versões começando em 1, estritamente crescente e **sem
+    /// buracos** (migração mal numerada ou duplicada reprova aqui). Não fixa o
+    /// total, então novas migrações (ex.: a `0005` da Fase 1) não quebram o teste.
     #[tokio::test]
     async fn migracoes_locais_sao_lidas_do_diretorio() {
         let versions = local_migration_versions().await.expect("ler migrations/");
-        assert_eq!(
-            versions,
-            vec![1, 2, 3, 4],
-            "revise se novas migrações entraram"
+        assert!(!versions.is_empty(), "nenhuma migração encontrada");
+        assert_eq!(versions[0], 1, "a numeração começa em 1");
+        assert!(
+            versions.windows(2).all(|w| w[0] < w[1]),
+            "versões estritamente crescentes: {versions:?}"
+        );
+        let last = *versions.last().expect("sequência não vazia");
+        let sem_buracos: Vec<i64> = (1..=last).collect();
+        assert_eq!(versions, sem_buracos, "migrações sem buracos: {versions:?}");
+        // As migrações já existentes (Fase 0) continuam presentes.
+        assert!(
+            (1..=4).all(|v| versions.contains(&v)),
+            "1..=4 devem estar presentes: {versions:?}"
         );
     }
 
