@@ -64,6 +64,57 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
+
+    /// A classe da regra não pertence ao projeto do ruleset.
+    ///
+    /// Uma regra só pode decidir uma classe do **mesmo projeto**: cruzar
+    /// projetos produziria decisões que a UI não consegue exibir e que a
+    /// exportação não consegue resolver.
+    #[error(
+        "classe `{class_id}` pertence ao projeto {class_project}, não ao projeto \
+         {ruleset_project} do ruleset; use uma classe do mesmo projeto"
+    )]
+    ClassProjectMismatch {
+        class_id: String,
+        class_project: String,
+        ruleset_project: String,
+    },
+
+    /// O pai referenciado (ruleset/classe) não existe.
+    #[error("{kind} `{id}` não existe")]
+    MissingParent { kind: &'static str, id: String },
+
+    /// A classe ainda é decidida por regras e não pode ser apagada.
+    ///
+    /// Com a FK `rules.class_id → classes(id) ON DELETE RESTRICT`
+    /// (migração `0011_rule_class_restrict`), o banco recusa o delete; esta
+    /// variante traduz a violação em contagem e caminho de saída — remover/
+    /// reapontar as regras, desativar a classe, ou apagar as duas juntas de
+    /// forma explícita (`class delete --force`, transação única).
+    #[error(
+        "classe `{class_id}` é usada por {count} regra(s); remova/reaponte as \
+         regras (`rule remove`) ou desative a classe, ou repita com --force \
+         para apagar as regras junto"
+    )]
+    ClassInUseByRules { class_id: String, count: i64 },
+
+    /// Corrida de versão ao gravar um ruleset: a unicidade
+    /// `UNIQUE(project_id, name, version)` foi violada mesmo com o lock de
+    /// linhagem (`pg_advisory_xact_lock`) — não é duplicidade de nome, é
+    /// colisão de versão restante (ex.: escritor fora do repositório). A
+    /// saída é tentar de novo, não escolher outro nome.
+    #[error("corrida de versão ao gravar ruleset `{name}`; tente novamente")]
+    VersionRace { name: String },
+
+    /// `parent_id` formaria um ciclo na hierarquia de classes (a cadeia de
+    /// mães volta na própria classe, ou excede o limite de profundidade —
+    /// ciclo provável). Inclui auto-pai.
+    #[error(
+        "ciclo na hierarquia de classes: `{class_id}` não pode ter `parent_id` \
+         {parent_id} (a cadeia de mães volta nele); escolha uma mãe fora da \
+         própria descendência"
+    )]
+    ClassParentCycle { class_id: String, parent_id: String },
 }
 
 /// Alias de resultado padrão da persistência.

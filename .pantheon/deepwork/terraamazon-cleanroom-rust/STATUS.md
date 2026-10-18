@@ -1003,7 +1003,8 @@ domain-first**; não substitui nem reescreve o histórico v0.1–v0.2.2 acima.
 - **Migrações:** `0005_phases`, `0006_aoi_cells`,
   `0007_grid_srid` (retificação da Decisão 4 em 2026-10-18),
   `0008_cell_validity` (gate de validade em `cells`), `0009_classes`,
-  `0010_rules`, `0011_queue`, `0012_scenes`.
+  `0010_rules`, `0011_rule_class_restrict` (Fase 2 — FK
+  `rules.class_id` com `ON DELETE RESTRICT`), `0012_queue`, `0013_scenes`.
 - **Metas:** cobertura **70% global / 85%** em `ta-engine` e repos de `ta-db`;
   **zero `unwrap`/`expect`** em libs não-teste.
 
@@ -1034,14 +1035,14 @@ domain-first**; não substitui nem reescreve o histórico v0.1–v0.2.2 acima.
 |---|---|---|
 | 0 | Usabilidade ponta a ponta (dev-up.sh, doctor, seed-demo, baseline, CI não-gating, docs) | **concluída** (2026-10-17/18) |
 | 1 | Projeto / Fase / AOI / Células bloqueadas (`0005`, `0006`, `0007`, `0008`) | **implementada e revisada** (Themis, 2026-10-18: aprovada com ressalvas); achados aplicados, **aguardando commit** |
-| 2 | Classes e regras/rulesets (`0009`, `0010`) | **pendente** |
-| 3 | Fila de processos + classificação básica (`0011`) | **pendente** |
-| 4 | Scenes / exchange (`0012`) — paralelizável após a Fase 1 | **pendente** |
+| 2 | Classes e regras/rulesets (`0009`, `0010`, `0011_rule_class_restrict`) | **implementada; revisão Themis aplicada** (2026-10-18), **aguardando commit** |
+| 3 | Fila de processos + classificação básica (`0012_queue`) | **pendente** |
+| 4 | Scenes / exchange (`0013_scenes`) — paralelizável após a Fase 1 | **pendente** |
 | 5 | Área, import/export e visualização | **pendente** |
 | 6 | Paridade comportamental e fechamento | **pendente** |
 
-**Fase 0 concluída; Fase 1 implementada e revisada, aguardando commit.**
-Fases 2–6 não iniciadas. Nenhum ADR criado (não solicitado).
+**Fase 0 concluída; Fases 1 e 2 implementadas/revisadas, aguardando commit.**
+Fases 3–6 não iniciadas. Nenhum ADR criado (não solicitado).
 
 ### Fechamento da revisão da Fase 1 (2026-10-18)
 
@@ -1050,7 +1051,8 @@ Themis aprovou com ressalvas; os achados de fechamento foram aplicados:
 - `0008_cell_validity`: trigger `cells_geom_validity` (BEFORE INSERT OR UPDATE)
   rejeita `NOT ST_IsValid(geom)` com mensagem acionável — mesma política de
   `features`, sem reparo silencioso. Idempotente. As migrações **futuras**
-  foram renumeradas: classes `0009`, rules `0010`, queue `0011`, scenes `0012`.
+  foram renumeradas: classes `0009`, rules `0010`, e (Fase 2 em diante)
+  `0011_rule_class_restrict`, queue `0012`, scenes `0013`.
 - `bulk_insert` de células roda em **transação única** (falha em qualquer lote
   não deixa grade parcial — o seed decide idempotência por `count > 0`).
 - `bulk_insert`/`bulk_insert_on` exigem `srid` **explícito** e o validam contra
@@ -1088,3 +1090,77 @@ fechamento (todos na árvore de trabalho): `crates/ta-db/migrations/0008_cell_va
 Novo: `.pantheon/deepwork/terraamazon-cleanroom-rust/PLAN-terraamazon-parity.md`.
 Modificado: este `STATUS.md` (linha de ponte no cabeçalho + esta seção final).
 Nenhum arquivo de código tocado.
+
+### Fechamento da revisão da Fase 2 (2026-10-18)
+
+Themis revisou a Fase 2 (classes/rulesets/regras na árvore de trabalho,
+não commitada); os achados foram aplicados por Hermes — **nada commitado**.
+
+- **F1 — cascata silenciosa:** migração **nova** `0011_rule_class_restrict`
+  (idempotente) recria `rules.class_id → classes(id)` com
+  **`ON DELETE RESTRICT`**. O repositório traduz a violação em
+  `Error::ClassInUseByRules` (contagem + caminho de saída). `class delete`
+  mostra a contagem e **bloqueia** sem `--force`; com `--force`, regras +
+  classe caem numa **única transação** (`PgClassRepo::delete_with_rules`).
+  Consequência de numeração registrada: `0012_queue` (Fase 3),
+  `0013_scenes` (Fase 4).
+- **F2 — corrida de versão:** `PgRuleSetRepo::create` substitui
+  "MAX(version)+1 + retry único" por **`pg_advisory_xact_lock`**
+  (`hashtext(project_id || ':' || name)`) envolvendo SELECT MAX + INSERT na
+  mesma transação. Colisão residual vira `Error::VersionRace`
+  ("corrida de versão …; tente novamente") e `duplicate_error` **não** a
+  captura mais (não é "nome duplicado"). Prova: **6 processos CLI reais ×
+  mesma linhagem × 5 rodadas → 6 criados, versões {1..6} sem buraco**
+  (teste `cli_ruleset_seis_processos_paralelos_em_cinco_rodadas`, verde).
+- **F3 — `not` + medida ausente (política decidida):** ausência **avaliada**
+  propaga para a regra inteira, inclusive sob `not`/`or` — regra com
+  comparação de medida ausente **nunca casa** (célula sem observação não é
+  classificada por negação; ex.: `NOT NDVI >= 1` sem `ndvi` → "nenhuma
+  classe"). A ausência é de medidas **efetivamente avaliadas**: curto-circuito
+  de `and`/`or` pode ocultar medidas à direita (F7).
+- **F4 — predicado inválido com rastro:** `Decision.skipped_invalid` +
+  `skipped_invalid_names` (ordenado); `rule eval` imprime
+  "regras ignoradas (predicado inválido): N [nomes]".
+- **F6 — ciclos de `parent_id`:** escrita sobe a cadeia de mães (limite 100)
+  e rejeita ciclo/auto-pai com `Error::ClassParentCycle` acionável.
+- **F8 — escrita de `is_active`:** `class update --active <bool>` e
+  `rule update --ruleset <id> --name <n> [--active b] [--priority p]
+  [--when expr] [--class id]` com update **parcial real** no repo
+  (`RulePatch` + `COALESCE($n, coluna)` — campo ausente preserva o valor).
+  **Decisão documentada:** `classes.is_active` hoje é atributo de **exibição**
+  — o motor não consulta classes; desativar classe não altera decisão
+  (o motor NÃO foi mudado nesta rodada; `rules.is_active` sim é consultado).
+- **F9/F10 — parser:** EBNF atualizada (aceita `.5`, `5.`, `+.5` — já
+  aceitos pelo parser); literal não finito (`inf` por overflow) ou com mais
+  de **17 dígitos significativos** (limite de distinção do `f64`) é rejeitado
+  com `RuleError::NumberOutOfRange` ("número fora de intervalo").
+- **F11 — código morto:** `RuleError::UnexpectedChar` removida (nunca
+  construída); `Predicate::matches` removida (só testes a chamavam —
+  `evaluate` é a API de avaliação; `matches_collecting` cobre o resto).
+- **F12 — `resolve_project("")`:** nome vazio/só-espaços é rejeitado antes
+  de tocar no banco (não auto-cria projeto sem nome).
+- **F5 — REGISTRADO para a Fase 3 (não implementado):** integridade
+  multi-projeto via triggers `BEFORE INSERT/UPDATE` comparando `project_id`
+  em `rules.class_id ↔ rulesets.project_id`,
+  `classes.class_group_id/parent_id` — requisito da fila de processos
+  (`0012_queue`), ver PLAN-terraamazon-parity §Fase 3.
+
+**Verificação real (2026-10-18):** `cargo fmt --all -- --check` ✓ ·
+`cargo clippy --workspace --all-targets -- -D warnings` ✓ ·
+`cargo test --workspace` ✓ (unitária) · `TA_TEST_PG=1 TA_PG_DSN=… cargo
+test --workspace` ✓ (gated, PG16+PostGIS 3.4 real) · migração `0011` em
+banco limpo 2× (11/11, depois "nada pendente") e em banco já em `0010`
+(FK `confdeltype = 'r'` confirmada) · `class delete` bloqueia com contagem
+("usada por 2 regra(s)") e `--force` apaga atômico · `rule eval` com
+`NOT NDVI >= 1` sem `ndvi` → "nenhuma classe" · `rule eval` mostra
+"regras ignoradas (predicado inválido): 1 [quebrada]" · ciclo A→B→A e
+auto-pai rejeitados · `--when 'ndvi >= 999…9'` (32 dígitos) rejeitado ·
+`resolve_project("")` rejeitado (zero projetos sem nome no banco) ·
+`dev-up.sh` 2× idempotente.
+
+Testes existentes atualizados com a nova semântica (motivo: F3 — regra com
+medida ausente nunca casa; curto-circuito oculta medidas à direita): os
+casos de `or`/`not` do motor foram reescritos para a política nova e o caso
+que classificava `agua` por negação sem observação vira "nenhuma classe"
+(`regra_not_sem_medida_nao_decide_classe`). Nenhum teste de produção
+assumia a semântica antiga fora do motor.

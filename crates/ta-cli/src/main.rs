@@ -221,6 +221,26 @@ enum Cmd {
         #[command(subcommand)]
         cmd: CellCmd,
     },
+    /// Classes — CRUD de classes e dos grupos de classes (Fase 2).
+    Class {
+        #[command(subcommand)]
+        cmd: ClassCmd,
+    },
+    /// Camadas de rascunho de classificação (Fase 2).
+    Draft {
+        #[command(subcommand)]
+        cmd: DraftCmd,
+    },
+    /// Rulesets versionados — criar/listar/mostrar (Fase 2).
+    Ruleset {
+        #[command(subcommand)]
+        cmd: RulesetCmd,
+    },
+    /// Regras de classificação — adicionar/listar/remover/avaliar (Fase 2).
+    Rule {
+        #[command(subcommand)]
+        cmd: RuleCmd,
+    },
 }
 
 /// Subcomandos de `phase`.
@@ -347,6 +367,289 @@ enum CellCmd {
         /// Id (UUID) da camada de células.
         #[arg(long)]
         cell_layer: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+}
+
+/// Subcomandos de `class`.
+#[derive(Debug, Subcommand)]
+enum ClassCmd {
+    /// Cria uma classe no projeto.
+    Create {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Nome da classe (único no projeto).
+        #[arg(long)]
+        name: String,
+        /// Grupo (id ou nome) do mesmo projeto.
+        #[arg(long)]
+        group: Option<String>,
+        /// Cor de exibição no formato #RRGGBB.
+        #[arg(long)]
+        color: Option<String>,
+        /// Classe-mãe (id ou nome) do mesmo projeto.
+        #[arg(long)]
+        parent: Option<String>,
+        /// Ordem de exibição (padrão 0).
+        #[arg(long, default_value_t = 0)]
+        sort_order: i32,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Lista as classes do projeto.
+    List {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Atualiza nome/grupo/cor/classe-mãe/atividade de uma classe.
+    Update {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Classe alvo: id (UUID) ou nome.
+        #[arg(long)]
+        class: String,
+        /// Novo nome.
+        #[arg(long)]
+        name: Option<String>,
+        /// Novo grupo (id ou nome).
+        #[arg(long)]
+        group: Option<String>,
+        /// Nova cor #RRGGBB.
+        #[arg(long)]
+        color: Option<String>,
+        /// Nova classe-mãe (id ou nome).
+        #[arg(long)]
+        parent: Option<String>,
+        /// Ativa/desativa a classe (hoje atributo de EXIBIÇÃO: o motor de
+        /// regras não consulta classes).
+        #[arg(long)]
+        active: Option<bool>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Remove uma classe; bloqueia se houver regras apontando para ela
+    /// (mostra a contagem), salvo --force (regras + classe numa transação).
+    Delete {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Classe alvo: id (UUID) ou nome.
+        #[arg(long)]
+        class: String,
+        /// Apaga TAMBÉM as regras que decidem a classe, numa única transação.
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Grupos de classes.
+    Group {
+        #[command(subcommand)]
+        cmd: ClassGroupCmd,
+    },
+}
+
+/// Subcomandos de `class group`.
+#[derive(Debug, Subcommand)]
+enum ClassGroupCmd {
+    /// Cria um grupo de classes.
+    Create {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Nome do grupo (único no projeto).
+        #[arg(long)]
+        name: String,
+        /// Ordem de exibição (padrão 0).
+        #[arg(long, default_value_t = 0)]
+        sort_order: i32,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Lista os grupos do projeto.
+    List {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Renomeia um grupo.
+    Rename {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Grupo alvo: id (UUID) ou nome.
+        #[arg(long)]
+        group: String,
+        /// Novo nome.
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Remove um grupo (classes ficam sem grupo).
+    Delete {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Grupo alvo: id (UUID) ou nome.
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+}
+
+/// Subcomandos de `draft`.
+#[derive(Debug, Subcommand)]
+enum DraftCmd {
+    /// Cria uma camada de rascunho de classificação.
+    Create {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Nome do rascunho (único no projeto).
+        #[arg(long)]
+        name: String,
+        /// Fase (id) do mesmo projeto.
+        #[arg(long)]
+        phase: Option<String>,
+        /// Camada de células (id) do mesmo projeto.
+        #[arg(long)]
+        cell_layer: Option<String>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Lista os rascunhos do projeto.
+    List {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+}
+
+/// Subcomandos de `ruleset`.
+#[derive(Debug, Subcommand)]
+enum RulesetCmd {
+    /// Cria a próxima versão de um ruleset.
+    Create {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Nome do ruleset (a linhagem é versionada por nome).
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Lista os rulesets do projeto (todas as versões).
+    List {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Mostra um ruleset (versão mais recente por padrão) e suas regras.
+    Show {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Nome do ruleset.
+        #[arg(long)]
+        name: String,
+        /// Versão específica (padrão: a mais recente).
+        #[arg(long)]
+        version: Option<i32>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+}
+
+/// Subcomandos de `rule`.
+#[derive(Debug, Subcommand)]
+enum RuleCmd {
+    /// Adiciona uma regra a um ruleset.
+    Add {
+        /// Id (UUID) do ruleset.
+        #[arg(long)]
+        ruleset: String,
+        /// Classe decidida: id (UUID) ou nome do mesmo projeto do ruleset.
+        #[arg(long)]
+        class: String,
+        /// Nome da regra (único no ruleset).
+        #[arg(long)]
+        name: String,
+        /// Prioridade (maior vence; empate desempata pelo menor nome).
+        #[arg(long, default_value_t = 0)]
+        priority: i32,
+        /// Predicado, ex.: `ndvi >= 0.6 and nbr < 0.1`.
+        #[arg(long)]
+        when: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Lista as regras de um ruleset (maior prioridade primeiro).
+    List {
+        /// Id (UUID) do ruleset.
+        #[arg(long)]
+        ruleset: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Remove uma regra pelo nome.
+    Remove {
+        /// Id (UUID) do ruleset.
+        #[arg(long)]
+        ruleset: String,
+        /// Nome da regra.
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Atualiza parcialmente uma regra — apenas as flags presentes mudam.
+    Update {
+        /// Id (UUID) do ruleset.
+        #[arg(long)]
+        ruleset: String,
+        /// Nome da regra (identifica a regra dentro do ruleset).
+        #[arg(long)]
+        name: String,
+        /// Nova classe decidida: id (UUID) ou nome do mesmo projeto.
+        #[arg(long)]
+        class: Option<String>,
+        /// Nova prioridade (maior vence).
+        #[arg(long)]
+        priority: Option<i32>,
+        /// Novo predicado, ex.: `ndvi >= 0.6 and nbr < 0.1`.
+        #[arg(long)]
+        when: Option<String>,
+        /// Ativa/desativa a regra (inativa é ignorada na avaliação).
+        #[arg(long)]
+        active: Option<bool>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Avalia o ruleset contra medidas observadas e imprime a decisão.
+    Eval {
+        /// Id (UUID) do ruleset.
+        #[arg(long)]
+        ruleset: String,
+        /// Medidas no formato `nome=valor,nome=valor` (ex.: `ndvi=0.7,nbr=0.05`).
+        #[arg(long, allow_hyphen_values = true)]
+        obs: String,
         #[arg(long)]
         dsn: Option<String>,
     },
@@ -530,6 +833,150 @@ async fn main() -> ExitCode {
                 flow::cell_list_blocked(dsn.as_deref(), &cell_layer).await
             }
         },
+        Cmd::Class { cmd } => match cmd {
+            ClassCmd::Create {
+                project,
+                name,
+                group,
+                color,
+                parent,
+                sort_order,
+                dsn,
+            } => {
+                flow::class_create(
+                    dsn.as_deref(),
+                    &project,
+                    &name,
+                    group.as_deref(),
+                    color.as_deref(),
+                    parent.as_deref(),
+                    sort_order,
+                )
+                .await
+            }
+            ClassCmd::List { project, dsn } => flow::class_list(dsn.as_deref(), &project).await,
+            ClassCmd::Update {
+                project,
+                class,
+                name,
+                group,
+                color,
+                parent,
+                active,
+                dsn,
+            } => {
+                flow::class_update(
+                    dsn.as_deref(),
+                    &project,
+                    &class,
+                    name,
+                    group,
+                    color,
+                    parent,
+                    active,
+                )
+                .await
+            }
+            ClassCmd::Delete {
+                project,
+                class,
+                force,
+                dsn,
+            } => flow::class_delete(dsn.as_deref(), &project, &class, force).await,
+            ClassCmd::Group { cmd } => match cmd {
+                ClassGroupCmd::Create {
+                    project,
+                    name,
+                    sort_order,
+                    dsn,
+                } => flow::class_group_create(dsn.as_deref(), &project, &name, sort_order).await,
+                ClassGroupCmd::List { project, dsn } => {
+                    flow::class_group_list(dsn.as_deref(), &project).await
+                }
+                ClassGroupCmd::Rename {
+                    project,
+                    group,
+                    name,
+                    dsn,
+                } => flow::class_group_rename(dsn.as_deref(), &project, &group, &name).await,
+                ClassGroupCmd::Delete {
+                    project,
+                    group,
+                    dsn,
+                } => flow::class_group_delete(dsn.as_deref(), &project, &group).await,
+            },
+        },
+        Cmd::Draft { cmd } => match cmd {
+            DraftCmd::Create {
+                project,
+                name,
+                phase,
+                cell_layer,
+                dsn,
+            } => {
+                flow::draft_create(
+                    dsn.as_deref(),
+                    &project,
+                    &name,
+                    phase.as_deref(),
+                    cell_layer.as_deref(),
+                )
+                .await
+            }
+            DraftCmd::List { project, dsn } => flow::draft_list(dsn.as_deref(), &project).await,
+        },
+        Cmd::Ruleset { cmd } => match cmd {
+            RulesetCmd::Create {
+                project,
+                name,
+                description,
+                dsn,
+            } => flow::ruleset_create(dsn.as_deref(), &project, &name, description).await,
+            RulesetCmd::List { project, dsn } => flow::ruleset_list(dsn.as_deref(), &project).await,
+            RulesetCmd::Show {
+                project,
+                name,
+                version,
+                dsn,
+            } => flow::ruleset_show(dsn.as_deref(), &project, &name, version).await,
+        },
+        Cmd::Rule { cmd } => match cmd {
+            RuleCmd::Add {
+                ruleset,
+                class,
+                name,
+                priority,
+                when,
+                dsn,
+            } => flow::rule_add(dsn.as_deref(), &ruleset, &class, &name, priority, &when).await,
+            RuleCmd::List { ruleset, dsn } => flow::rule_list(dsn.as_deref(), &ruleset).await,
+            RuleCmd::Remove { ruleset, name, dsn } => {
+                flow::rule_remove(dsn.as_deref(), &ruleset, &name).await
+            }
+            RuleCmd::Update {
+                ruleset,
+                name,
+                class,
+                priority,
+                when,
+                active,
+                dsn,
+            } => {
+                flow::rule_update(
+                    dsn.as_deref(),
+                    &ruleset,
+                    &name,
+                    class,
+                    priority,
+                    when,
+                    active,
+                )
+                .await
+            }
+            RuleCmd::Eval { ruleset, obs, dsn } => {
+                flow::rule_eval(dsn.as_deref(), &ruleset, &obs).await
+            }
+        },
     };
 
     match result {
@@ -595,6 +1042,15 @@ pub(crate) async fn resolve_project<R>(
 where
     R: ProjectRepo,
 {
+    // F12: nome vazio/só-espaços auto-criaria um projeto sem nome — rejeita
+    // antes de tocar no banco, com erro acionável.
+    if id_or_name.trim().is_empty() {
+        return Err(
+            "nome de projeto vazio: informe --project com um nome (ex.: --project demo) \
+             ou um id (UUID) de projeto existente"
+                .to_owned(),
+        );
+    }
     let looks_uuid = id_or_name.len() == 36 && id_or_name.as_bytes()[8] == b'-';
     if looks_uuid {
         if let Some(p) = repo.get(id_or_name).await.map_err(|e| e.to_string())? {
@@ -620,6 +1076,10 @@ where
 mod tests {
     use std::io::Read;
     use std::net::TcpListener;
+
+    use async_trait::async_trait;
+    use ta_core::project::Project;
+    use ta_db::repo::ProjectRepo;
 
     use super::*;
 
@@ -653,5 +1113,43 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "deve falhar rápido (~5 s), levou {elapsed:?}: {err}"
         );
+    }
+
+    /// Mock mínimo de `ProjectRepo` (sem banco): se `resolve_project`
+    /// tentasse CRIAR, `create` entra em pânico — o teste prova que o nome
+    /// vazio é rejeitado antes de qualquer escrita (F12).
+    struct RepoSemEscrita;
+    #[async_trait]
+    impl ProjectRepo for RepoSemEscrita {
+        async fn create(&self, _project: &Project) -> ta_db::Result<Project> {
+            panic!("resolve_project não pode criar projeto com nome vazio");
+        }
+        async fn get(&self, _id: &str) -> ta_db::Result<Option<Project>> {
+            Ok(None)
+        }
+        async fn list(&self) -> ta_db::Result<Vec<Project>> {
+            Ok(Vec::new())
+        }
+        async fn delete(&self, _id: &str) -> ta_db::Result<bool> {
+            Ok(false)
+        }
+        async fn rename(&self, _id: &str, _new_name: &str) -> ta_db::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    /// F12: `resolve_project("")` (ou só espaços) rejeita com erro acionável
+    /// em vez de auto-criar um projeto sem nome.
+    #[tokio::test]
+    async fn resolve_project_rejeita_nome_vazio() {
+        for vazio in ["", "   "] {
+            let err = resolve_project(&RepoSemEscrita, vazio)
+                .await
+                .expect_err("nome vazio deve ser rejeitado");
+            assert!(
+                err.contains("nome de projeto vazio") && err.contains("--project"),
+                "mensagem acionável ausente para {vazio:?}: {err}"
+            );
+        }
     }
 }

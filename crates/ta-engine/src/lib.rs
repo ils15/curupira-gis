@@ -15,7 +15,10 @@
 //!
 //! Módulos:
 //! - [`grid`]: grade regular alinhada à origem, recortada pela AOI.
+//! - [`rule`]: parser/avaliador de predicados de regras de classificação.
 
 pub mod grid;
+pub mod rule;
 
 pub use grid::{GridCell, MAX_CELLS, aoi_bbox, candidate_count, generate_grid};
+pub use rule::{Decision, Predicate, evaluate, parse_predicate};

@@ -9,16 +9,22 @@ use geo_types::{Geometry, MultiPolygon, Polygon};
 use sqlx::PgPool;
 use ta_core::aoi::AoiLayer;
 use ta_core::cell::{BlockedCell, Cell, CellLayer, GridSpec};
+use ta_core::classification::{Class, ClassGroup, DraftLayer};
 use ta_core::feature::Feature;
 use ta_core::phase::Phase;
+use ta_core::rule::{Rule, RuleSet};
 use ta_db::repo::{FeatureRepo, LayerRepo, PgFeatureRepo, PgLayerRepo, PgProjectRepo};
 use ta_db::repo_aoi::{AoiLayerRepo, PgAoiLayerRepo};
 use ta_db::repo_cell::{
     BlockedCellRepo, CellLayerRepo, CellRepo, PgBlockedCellRepo, PgCellLayerRepo, PgCellRepo,
 };
+use ta_db::repo_class::{
+    ClassGroupRepo, ClassRepo, DraftLayerRepo, PgClassGroupRepo, PgClassRepo, PgDraftLayerRepo,
+};
 use ta_db::repo_phase::{PgPhaseRepo, PhaseRepo};
+use ta_db::repo_ruleset::{PgRuleRepo, PgRuleSetRepo, RulePatch, RuleRepo, RuleSetRepo};
 use ta_db::spatial::{TARGET_SRID, srid_units, transform_geometry};
-use ta_engine::{aoi_bbox, candidate_count, generate_grid};
+use ta_engine::{aoi_bbox, candidate_count, evaluate, generate_grid, parse_predicate};
 
 use crate::resolve_project;
 
@@ -465,4 +471,854 @@ fn cells_from_grid(generated: &[ta_engine::GridCell]) -> Vec<Cell> {
             col_index: c.col_index,
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Fase 2 — classes, grupos, rascunhos, rulesets e regras.
+// ---------------------------------------------------------------------------
+
+/// `class group create` — cria um grupo de classes no projeto.
+pub async fn class_group_create(
+    dsn: Option<&str>,
+    project: &str,
+    name: &str,
+    sort_order: i32,
+) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let mut group = ClassGroup::new(&project.id, name);
+    group.sort_order = sort_order;
+    let saved = PgClassGroupRepo::new(pool.clone())
+        .create(&group)
+        .await
+        .map_err(|e| duplicate_error(&e, "grupo de classes", name))?;
+    println!(
+        "grupo criado: {}\tprojeto={}\t{}",
+        saved.id, project.name, saved.name
+    );
+    pool.close().await;
+    Ok(())
+}
+
+/// `class group list` — lista os grupos do projeto.
+pub async fn class_group_list(dsn: Option<&str>, project: &str) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let groups = PgClassGroupRepo::new(pool.clone())
+        .list_for_project(&project.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if groups.is_empty() {
+        println!("(nenhum grupo de classes no projeto `{}`)", project.name);
+    }
+    for group in &groups {
+        println!("{}\tsort={}\t{}", group.id, group.sort_order, group.name);
+    }
+    pool.close().await;
+    Ok(())
+}
+
+/// `class group rename` — renomeia um grupo (id ou nome).
+pub async fn class_group_rename(
+    dsn: Option<&str>,
+    project: &str,
+    group: &str,
+    name: &str,
+) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let mut existing = resolve_group(&pool, &project.id, group).await?;
+    existing.name = name.to_owned();
+    let saved = PgClassGroupRepo::new(pool.clone())
+        .update(&existing)
+        .await
+        .map_err(|e| duplicate_error(&e, "grupo de classes", name))?
+        .ok_or_else(|| format!("grupo `{group}` não existe mais"))?;
+    println!("grupo renomeado: {}\t{}", saved.id, saved.name);
+    pool.close().await;
+    Ok(())
+}
+
+/// `class group delete` — remove um grupo; as classes ficam sem grupo.
+pub async fn class_group_delete(
+    dsn: Option<&str>,
+    project: &str,
+    group: &str,
+) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let existing = resolve_group(&pool, &project.id, group).await?;
+    let removed = PgClassGroupRepo::new(pool.clone())
+        .delete(&existing.id)
+        .await
+        .map_err(|e| format!("remover grupo `{}`: {e}", existing.name))?;
+    if !removed {
+        return Err(format!("grupo `{group}` não existe mais"));
+    }
+    println!(
+        "grupo removido: {}\t{}\t(as classes ficaram sem grupo)",
+        existing.id, existing.name
+    );
+    pool.close().await;
+    Ok(())
+}
+
+/// `class create` — cria uma classe no projeto.
+// All flags of `class create` map 1:1 to parameters; a struct here would only
+// hide the CLI shape.
+#[allow(clippy::too_many_arguments)]
+pub async fn class_create(
+    dsn: Option<&str>,
+    project: &str,
+    name: &str,
+    group: Option<&str>,
+    color: Option<&str>,
+    parent: Option<&str>,
+    sort_order: i32,
+) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    validate_color(color)?;
+
+    let group_id = match group {
+        Some(group) => Some(resolve_group(&pool, &project.id, group).await?.id),
+        None => None,
+    };
+    let parent_id = match parent {
+        Some(parent) => Some(resolve_class(&pool, &project.id, parent).await?.id),
+        None => None,
+    };
+
+    let mut class = Class::new(&project.id, name)
+        .with_group(group_id.as_deref())
+        .with_color(color)
+        .with_parent(parent_id.as_deref());
+    class.sort_order = sort_order;
+    let saved = PgClassRepo::new(pool.clone())
+        .create(&class)
+        .await
+        .map_err(|e| duplicate_error(&e, "classe", name))?;
+    println!(
+        "classe criada: {}\tprojeto={}\t{}\tcor={}",
+        saved.id,
+        project.name,
+        saved.name,
+        saved.color.as_deref().unwrap_or("(sem cor)")
+    );
+    pool.close().await;
+    Ok(())
+}
+
+/// `class list` — lista as classes do projeto (com o nome do grupo).
+pub async fn class_list(dsn: Option<&str>, project: &str) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let groups = PgClassGroupRepo::new(pool.clone())
+        .list_for_project(&project.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let group_names: std::collections::BTreeMap<String, String> = groups
+        .into_iter()
+        .map(|group| (group.id, group.name))
+        .collect();
+    let classes = PgClassRepo::new(pool.clone())
+        .list_for_project(&project.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if classes.is_empty() {
+        println!("(nenhuma classe no projeto `{}`)", project.name);
+    }
+    for class in &classes {
+        let group = class
+            .class_group_id
+            .as_ref()
+            .and_then(|id| group_names.get(id))
+            .map(String::as_str)
+            .unwrap_or("(sem grupo)");
+        println!(
+            "{}\tgrupo={group}\tat={}\tsort={}\tcor={}\t{}",
+            class.id,
+            if class.is_active { "sim" } else { "nao" },
+            class.sort_order,
+            class.color.as_deref().unwrap_or("(sem cor)"),
+            class.name
+        );
+    }
+    pool.close().await;
+    Ok(())
+}
+
+/// `class update` — altera nome/grupo/cor/classe-mãe/atividade de uma classe.
+#[allow(clippy::too_many_arguments)]
+pub async fn class_update(
+    dsn: Option<&str>,
+    project: &str,
+    class: &str,
+    name: Option<String>,
+    group: Option<String>,
+    color: Option<String>,
+    parent: Option<String>,
+    active: Option<bool>,
+) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let mut existing = resolve_class(&pool, &project.id, class).await?;
+
+    if let Some(name) = name {
+        existing.name = name;
+    }
+    if let Some(group) = group {
+        existing.class_group_id = Some(resolve_group(&pool, &project.id, &group).await?.id);
+    }
+    if let Some(color) = color {
+        validate_color(Some(&color))?;
+        existing.color = Some(color);
+    }
+    if let Some(parent) = parent {
+        let parent = resolve_class(&pool, &project.id, &parent).await?;
+        if parent.id == existing.id {
+            return Err("uma classe não pode ser mãe de si mesma".to_owned());
+        }
+        existing.parent_id = Some(parent.id);
+    }
+    if let Some(active) = active {
+        // Nota (F8): `classes.is_active` hoje é atributo de EXIBIÇÃO — o
+        // motor de regras não consulta classes; desativar não altera
+        // decisões de classificação.
+        existing.is_active = active;
+    }
+
+    let saved = PgClassRepo::new(pool.clone())
+        .update(&existing)
+        .await
+        .map_err(|e| duplicate_error(&e, "classe", &existing.name))?
+        .ok_or_else(|| format!("classe `{class}` não existe mais"))?;
+    println!("classe atualizada: {}\t{}", saved.id, saved.name);
+    pool.close().await;
+    Ok(())
+}
+
+/// `class delete` — remove uma classe.
+///
+/// Pré-checagem mostra a contagem de regras que decidem a classe: sem
+/// `--force`, o delete é **bloqueado** com a mensagem acionável (a FK é
+/// `ON DELETE RESTRICT` desde a migração `0011`); com `--force`, as regras e
+/// a classe caem numa **única transação** (intenção explícita do operador).
+pub async fn class_delete(
+    dsn: Option<&str>,
+    project: &str,
+    class: &str,
+    force: bool,
+) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let existing = resolve_class(&pool, &project.id, class).await?;
+
+    let repo = PgClassRepo::new(pool.clone());
+    let rules_using = PgRuleRepo::new(pool.clone())
+        .count_for_class(&existing.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if rules_using > 0 && !force {
+        pool.close().await;
+        return Err(format!(
+            "classe `{}` é usada por {} regra(s); remova/reaponte as regras \
+             (`rule remove`) ou desative a classe, ou repita com --force para \
+             apagar as regras junto",
+            existing.name, rules_using
+        ));
+    }
+    let removed = if rules_using > 0 {
+        // `--force` com regras: regras + classe atomicamente (transação única
+        // no repositório; sem janela em que a classe some sem as regras).
+        repo.delete_with_rules(&existing.id).await
+    } else {
+        repo.delete(&existing.id).await
+    }
+    .map_err(|e| class_delete_error(&e, &existing.name))?;
+    if !removed {
+        pool.close().await;
+        return Err(format!("classe `{class}` não existe mais"));
+    }
+    if rules_using > 0 {
+        println!(
+            "classe removida: {}\t{}\t({} regra(s) removida(s) na mesma transação)",
+            existing.id, existing.name, rules_using
+        );
+    } else {
+        println!("classe removida: {}\t{}", existing.id, existing.name);
+    }
+    pool.close().await;
+    Ok(())
+}
+
+/// Erro de remoção de classe: a corrida restante (regra criada entre a
+/// pré-checagem e o delete) vira a mesma mensagem acionável do repo.
+fn class_delete_error(err: &ta_db::Error, name: &str) -> String {
+    if let ta_db::Error::ClassInUseByRules { count, .. } = err {
+        return format!(
+            "classe `{name}` é usada por {count} regra(s); remova/reaponte as \
+             regras (`rule remove`) ou desative a classe, ou repita com \
+             --force para apagar as regras junto"
+        );
+    }
+    format!("remover classe `{name}`: {err}")
+}
+
+/// `draft create` — cria uma camada de rascunho de classificação.
+pub async fn draft_create(
+    dsn: Option<&str>,
+    project: &str,
+    name: &str,
+    phase: Option<&str>,
+    cell_layer: Option<&str>,
+) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let phase_id = match phase {
+        Some(phase) => Some(ensure_phase_in_project(&pool, &project.id, phase).await?),
+        None => None,
+    };
+    let cell_layer_id = match cell_layer {
+        Some(cell_layer) => {
+            Some(ensure_cell_layer_in_project(&pool, &project.id, cell_layer).await?)
+        }
+        None => None,
+    };
+    let draft = DraftLayer::new(&project.id, name)
+        .with_phase(phase_id.as_deref())
+        .with_cell_layer(cell_layer_id.as_deref());
+    let saved = PgDraftLayerRepo::new(pool.clone())
+        .create(&draft)
+        .await
+        .map_err(|e| duplicate_error(&e, "rascunho", name))?;
+    println!(
+        "rascunho criado: {}\tprojeto={}\testado={}",
+        saved.id, project.name, saved.state
+    );
+    pool.close().await;
+    Ok(())
+}
+
+/// `draft list` — lista os rascunhos do projeto.
+pub async fn draft_list(dsn: Option<&str>, project: &str) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let drafts = PgDraftLayerRepo::new(pool.clone())
+        .list_for_project(&project.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if drafts.is_empty() {
+        println!("(nenhum rascunho no projeto `{}`)", project.name);
+    }
+    for draft in &drafts {
+        println!(
+            "{}\testado={}\tfase={}\tgrade={}\t{}",
+            draft.id,
+            draft.state,
+            draft.phase_id.as_deref().unwrap_or("(sem fase)"),
+            draft.cell_layer_id.as_deref().unwrap_or("(sem grade)"),
+            draft.name
+        );
+    }
+    pool.close().await;
+    Ok(())
+}
+
+/// `ruleset create` — grava a próxima versão da linhagem `(projeto, nome)`.
+pub async fn ruleset_create(
+    dsn: Option<&str>,
+    project: &str,
+    name: &str,
+    description: Option<String>,
+) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let ruleset = RuleSet::new(&project.id, name).with_description(description.as_deref());
+    let saved = PgRuleSetRepo::new(pool.clone())
+        .create(&ruleset)
+        .await
+        .map_err(|e| duplicate_error(&e, "ruleset", name))?;
+    println!(
+        "ruleset criado: {}\tprojeto={}\t{}\tversao={}",
+        saved.id, project.name, saved.name, saved.version
+    );
+    pool.close().await;
+    Ok(())
+}
+
+/// `ruleset list` — lista as versões dos rulesets do projeto.
+pub async fn ruleset_list(dsn: Option<&str>, project: &str) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let rulesets = PgRuleSetRepo::new(pool.clone())
+        .list_for_project(&project.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if rulesets.is_empty() {
+        println!("(nenhum ruleset no projeto `{}`)", project.name);
+    }
+    for ruleset in &rulesets {
+        println!(
+            "{}\t{}\tversao={}\tdescricao={}",
+            ruleset.id,
+            ruleset.name,
+            ruleset.version,
+            ruleset.description.as_deref().unwrap_or("(sem descricao)")
+        );
+    }
+    pool.close().await;
+    Ok(())
+}
+
+/// `ruleset show` — mostra a versão (padrão: mais recente) e suas regras.
+pub async fn ruleset_show(
+    dsn: Option<&str>,
+    project: &str,
+    name: &str,
+    version: Option<i32>,
+) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let ruleset = PgRuleSetRepo::new(pool.clone())
+        .find(&project.id, name, version)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "ruleset `{name}`{} não existe no projeto `{}`; crie com `ruleset create`",
+                version
+                    .map(|v| format!(" (versão {v})"))
+                    .unwrap_or_default(),
+                project.name
+            )
+        })?;
+    println!(
+        "ruleset: {}\t{}\tversao={}\tdescricao={}",
+        ruleset.id,
+        ruleset.name,
+        ruleset.version,
+        ruleset.description.as_deref().unwrap_or("(sem descricao)")
+    );
+    let classes = class_names(&pool, &project.id).await?;
+    let rules = PgRuleRepo::new(pool.clone())
+        .list_for_ruleset(&ruleset.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if rules.is_empty() {
+        println!("(nenhuma regra neste ruleset)");
+    }
+    for rule in &rules {
+        println!(
+            "  {}\tprioridade={}\tat={}\tclasse={}\tquando={}",
+            rule.name,
+            rule.priority,
+            if rule.is_active { "sim" } else { "nao" },
+            classes
+                .get(&rule.class_id)
+                .map(String::as_str)
+                .unwrap_or(&rule.class_id),
+            rule.predicate
+        );
+    }
+    pool.close().await;
+    Ok(())
+}
+
+/// `rule add` — valida o predicado e grava a regra no ruleset.
+pub async fn rule_add(
+    dsn: Option<&str>,
+    ruleset_id: &str,
+    class: &str,
+    name: &str,
+    priority: i32,
+    predicate: &str,
+) -> Result<(), String> {
+    // Validação do predicado ANTES de tocar no banco: não gravar lixo.
+    parse_predicate(predicate).map_err(|e| format!("predicado inválido: {e}"))?;
+
+    let pool = crate::open_pool(dsn).await?;
+    let ruleset = PgRuleSetRepo::new(pool.clone())
+        .get(ruleset_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("ruleset `{ruleset_id}` não existe"))?;
+    let class = resolve_class(&pool, &ruleset.project_id, class).await?;
+    let rule = Rule::new(&ruleset.id, &class.id, name, predicate).with_priority(priority);
+    let saved = PgRuleRepo::new(pool.clone())
+        .create(&rule)
+        .await
+        .map_err(|e| rule_create_error(&e, name, class.name.as_str()))?;
+    println!(
+        "regra adicionada: {}\truleset={} (v{})\tclasse={}\tprioridade={}",
+        saved.id, ruleset.name, ruleset.version, class.name, saved.priority
+    );
+    pool.close().await;
+    Ok(())
+}
+
+/// `rule list` — lista as regras do ruleset (maior prioridade primeiro).
+pub async fn rule_list(dsn: Option<&str>, ruleset_id: &str) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let ruleset = PgRuleSetRepo::new(pool.clone())
+        .get(ruleset_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("ruleset `{ruleset_id}` não existe"))?;
+    let classes = class_names(&pool, &ruleset.project_id).await?;
+    let rules = PgRuleRepo::new(pool.clone())
+        .list_for_ruleset(&ruleset.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if rules.is_empty() {
+        println!("(nenhuma regra no ruleset `{}`)", ruleset.name);
+    }
+    for rule in &rules {
+        println!(
+            "{}\tprioridade={}\tat={}\tclasse={}\tquando={}",
+            rule.name,
+            rule.priority,
+            if rule.is_active { "sim" } else { "nao" },
+            classes
+                .get(&rule.class_id)
+                .map(String::as_str)
+                .unwrap_or(&rule.class_id),
+            rule.predicate
+        );
+    }
+    pool.close().await;
+    Ok(())
+}
+
+/// `rule remove` — remove uma regra pelo nome dentro do ruleset.
+pub async fn rule_remove(dsn: Option<&str>, ruleset_id: &str, name: &str) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let rules = PgRuleRepo::new(pool.clone())
+        .list_for_ruleset(ruleset_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let rule = rules
+        .into_iter()
+        .find(|rule| rule.name == name)
+        .ok_or_else(|| {
+            format!("regra `{name}` não existe no ruleset `{ruleset_id}`; veja `rule list`")
+        })?;
+    if !PgRuleRepo::new(pool.clone())
+        .delete(&rule.id)
+        .await
+        .map_err(|e| format!("remover regra `{name}`: {e}"))?
+    {
+        return Err(format!("regra `{name}` não existe mais"));
+    }
+    println!("regra removida: {}\t{}", rule.id, rule.name);
+    pool.close().await;
+    Ok(())
+}
+
+/// `rule update` — atualização **parcial** de uma regra identificada por
+/// `--ruleset` + `--name`: apenas as flags presentes alteram o campo (o
+/// update no repositório preserva os ausentes, nunca zera).
+pub async fn rule_update(
+    dsn: Option<&str>,
+    ruleset_id: &str,
+    name: &str,
+    class: Option<String>,
+    priority: Option<i32>,
+    when: Option<String>,
+    active: Option<bool>,
+) -> Result<(), String> {
+    if class.is_none() && priority.is_none() && when.is_none() && active.is_none() {
+        return Err(
+            "nada para atualizar em `rule update`: informe --class, --priority, \
+             --when ou --active"
+                .to_owned(),
+        );
+    }
+    // Validação do predicado ANTES de tocar no banco: não gravar lixo.
+    if let Some(predicate) = &when {
+        parse_predicate(predicate).map_err(|e| format!("predicado inválido: {e}"))?;
+    }
+    let pool = crate::open_pool(dsn).await?;
+    let ruleset = PgRuleSetRepo::new(pool.clone())
+        .get(ruleset_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("ruleset `{ruleset_id}` não existe"))?;
+    let class_id = match &class {
+        Some(class) => Some(resolve_class(&pool, &ruleset.project_id, class).await?.id),
+        None => None,
+    };
+    let patch = RulePatch {
+        class_id,
+        priority,
+        predicate: when,
+        is_active: active,
+    };
+    let updated = PgRuleRepo::new(pool.clone())
+        .update_partial(&ruleset.id, name, &patch)
+        .await
+        .map_err(|e| format!("atualizar regra `{name}`: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "regra `{name}` não existe no ruleset `{}`; veja `rule list`",
+                ruleset.name
+            )
+        })?;
+    let classes = class_names(&pool, &ruleset.project_id).await?;
+    println!(
+        "regra atualizada: {}\truleset={} (v{})\tclasse={}\tprioridade={}\tat={}\tquando={}",
+        updated.id,
+        ruleset.name,
+        ruleset.version,
+        classes
+            .get(&updated.class_id)
+            .map(String::as_str)
+            .unwrap_or(&updated.class_id),
+        updated.priority,
+        if updated.is_active { "sim" } else { "nao" },
+        updated.predicate
+    );
+    pool.close().await;
+    Ok(())
+}
+
+/// `rule eval` — avalia o ruleset (motor puro) contra medidas observadas.
+pub async fn rule_eval(dsn: Option<&str>, ruleset_id: &str, obs: &str) -> Result<(), String> {
+    let measures = parse_observations(obs)?;
+    let pool = crate::open_pool(dsn).await?;
+    let ruleset = PgRuleSetRepo::new(pool.clone())
+        .get(ruleset_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("ruleset `{ruleset_id}` não existe"))?;
+    let rules = PgRuleRepo::new(pool.clone())
+        .list_for_ruleset(&ruleset.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let decision = evaluate(&rules, &measures);
+
+    match decision.class_id.as_deref() {
+        Some(class_id) => {
+            let class = PgClassRepo::new(pool.clone())
+                .get(class_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            let class_name = class.as_ref().map_or(class_id, |c| c.name.as_str());
+            let winner = rules
+                .iter()
+                .find(|rule| Some(rule.id.as_str()) == decision.rule_id.as_deref());
+            println!(
+                "decisão: classe={class_name} ({class_id})\tregra={}\tprioridade={}",
+                winner.map_or("(desconhecida)", |rule| rule.name.as_str()),
+                winner.map_or(0, |rule| rule.priority)
+            );
+        }
+        None => println!("decisão: nenhuma classe"),
+    }
+    println!("  regras avaliadas: {}", decision.evaluated);
+    if decision.skipped_invalid > 0 {
+        println!(
+            "  regras ignoradas (predicado inválido): {} [{}]",
+            decision.skipped_invalid,
+            decision.skipped_invalid_names.join(", ")
+        );
+    }
+    if decision.missing_measures.is_empty() {
+        println!("  medidas ausentes: (nenhuma)");
+    } else {
+        println!(
+            "  medidas ausentes: {}",
+            decision.missing_measures.join(", ")
+        );
+    }
+    pool.close().await;
+    Ok(())
+}
+
+/// Resolve um grupo por UUID ou nome dentro do projeto.
+async fn resolve_group(
+    pool: &PgPool,
+    project_id: &str,
+    id_or_name: &str,
+) -> Result<ClassGroup, String> {
+    let repo = PgClassGroupRepo::new(pool.clone());
+    if looks_uuid(id_or_name) {
+        if let Some(group) = repo.get(id_or_name).await.map_err(|e| e.to_string())? {
+            if group.project_id != project_id {
+                return Err(format!(
+                    "grupo `{id_or_name}` pertence a outro projeto ({}); use um grupo deste projeto",
+                    group.project_id
+                ));
+            }
+            return Ok(group);
+        }
+    }
+    repo.list_for_project(project_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|group| group.name == id_or_name)
+        .ok_or_else(|| {
+            format!("grupo `{id_or_name}` não existe neste projeto; crie com `class group create`")
+        })
+}
+
+/// Resolve uma classe por UUID ou nome dentro do projeto.
+async fn resolve_class(pool: &PgPool, project_id: &str, id_or_name: &str) -> Result<Class, String> {
+    let repo = PgClassRepo::new(pool.clone());
+    if looks_uuid(id_or_name) {
+        if let Some(class) = repo.get(id_or_name).await.map_err(|e| e.to_string())? {
+            if class.project_id != project_id {
+                return Err(format!(
+                    "classe `{id_or_name}` pertence a outro projeto ({}); use uma classe deste projeto",
+                    class.project_id
+                ));
+            }
+            return Ok(class);
+        }
+    }
+    repo.list_for_project(project_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|class| class.name == id_or_name)
+        .ok_or_else(|| {
+            format!("classe `{id_or_name}` não existe neste projeto; crie com `class create`")
+        })
+}
+
+/// Valida que a camada de células é do projeto e devolve o id canônico.
+async fn ensure_cell_layer_in_project(
+    pool: &PgPool,
+    project_id: &str,
+    cell_layer_id: &str,
+) -> Result<String, String> {
+    let layer = PgCellLayerRepo::new(pool.clone())
+        .get(cell_layer_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("camada de células `{cell_layer_id}` não existe"))?;
+    if layer.project_id != project_id {
+        return Err(format!(
+            "camada de células `{cell_layer_id}` pertence a outro projeto ({}); \
+             use uma grade deste projeto",
+            layer.project_id
+        ));
+    }
+    Ok(layer.id)
+}
+
+/// Mapa `classes.id → nome` para exibição.
+async fn class_names(
+    pool: &PgPool,
+    project_id: &str,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    Ok(PgClassRepo::new(pool.clone())
+        .list_for_project(project_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|class| (class.id, class.name))
+        .collect())
+}
+
+/// `#RRGGBB` (7 bytes, `#` + 6 hex). A mesma regra do CHECK da migração 0009.
+fn validate_color(color: Option<&str>) -> Result<(), String> {
+    let Some(color) = color else {
+        return Ok(());
+    };
+    let bytes = color.as_bytes();
+    let ok = bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(u8::is_ascii_hexdigit);
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "cor inválida `{color}`: use o formato hexadecimal #RRGGBB (ex.: #1A7F3C)"
+        ))
+    }
+}
+
+fn looks_uuid(value: &str) -> bool {
+    value.len() == 36 && value.as_bytes()[8] == b'-'
+}
+
+/// Interpreta `--obs nome=valor,nome=valor` (nomes em minúsculas).
+pub fn parse_observations(spec: &str) -> Result<std::collections::BTreeMap<String, f64>, String> {
+    if spec.trim().is_empty() {
+        return Err("--obs vazio: informe medidas como `ndvi=0.7,nbr=0.05`".to_owned());
+    }
+    let mut measures = std::collections::BTreeMap::new();
+    for part in spec.split(',') {
+        let (name, value) = part.split_once('=').ok_or_else(|| {
+            format!(
+                "medida inválida `{}`: use `nome=valor` (ex.: ndvi=0.7)",
+                part.trim()
+            )
+        })?;
+        let name = name.trim().to_ascii_lowercase();
+        if !is_measure_name(&name) {
+            return Err(format!(
+                "nome de medida inválido `{name}`: use letras minúsculas, dígitos e `_` \
+                 (começando por letra ou `_`)"
+            ));
+        }
+        let value: f64 = value.trim().parse().map_err(|_| {
+            format!(
+                "valor inválido `{}` para a medida `{name}`: use um número (ex.: 0.7)",
+                value.trim()
+            )
+        })?;
+        if !value.is_finite() {
+            return Err(format!("valor da medida `{name}` não é finito: {value}"));
+        }
+        if measures.insert(name.clone(), value).is_some() {
+            return Err(format!("medida `{name}` repetida em --obs"));
+        }
+    }
+    Ok(measures)
+}
+
+fn is_measure_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_lowercase() || first == '_') {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+/// Erro de escrita com nome duplicado vira mensagem acionável (a única
+/// colisão esperada é o `UNIQUE(project_id, name)` / `UNIQUE(ruleset_id, name)`).
+///
+/// `VersionRace` NÃO é duplicidade — é colisão de versão restante sob o lock
+/// de linhagem (F2) — e passa com a própria mensagem ("tente novamente"),
+/// nunca com "escolha outro nome".
+fn duplicate_error(err: &ta_db::Error, kind: &str, name: &str) -> String {
+    if let ta_db::Error::VersionRace { .. } = err {
+        return err.to_string();
+    }
+    if let ta_db::Error::Sql(sqlx::Error::Database(db)) = err {
+        if db.is_unique_violation() {
+            return format!(
+                "já existe um(a) {kind} com o nome `{name}`; escolha outro nome em --name"
+            );
+        }
+    }
+    // Sem verbo ("criar"): o mesmo mapa serve a `update` (erro tipado de
+    // ciclo/clone sai com a própria mensagem, não com "criar ...").
+    format!("{kind} `{name}`: {err}")
+}
+
+fn rule_create_error(err: &ta_db::Error, name: &str, class: &str) -> String {
+    if let ta_db::Error::Sql(sqlx::Error::Database(db)) = err {
+        if db.is_unique_violation() {
+            return format!(
+                "já existe uma regra com o nome `{name}` neste ruleset; \
+                 escolha outro nome em --name"
+            );
+        }
+    }
+    format!("criar regra `{name}` para a classe `{class}`: {err}")
 }

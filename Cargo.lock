@@ -4741,6 +4741,7 @@ dependencies = [
 name = "ta-cli"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "clap",
  "geo-types",
  "serde_json",

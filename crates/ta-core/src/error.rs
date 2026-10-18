@@ -1,5 +1,7 @@
 //! Erro unificado do domínio (`ta-core`).
 
+use crate::rule::RuleError;
+
 /// Erro compartilhado por todo o domínio.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -32,6 +34,14 @@ pub enum Error {
     /// Falha de contrato no motor de grade (AOI/especificação inválidas).
     #[error(transparent)]
     Grid(#[from] GridError),
+
+    /// Predicado de regra inválido (sintaxe; inclui a posição do erro).
+    #[error(transparent)]
+    Rule(#[from] RuleError),
+
+    /// Estado de rascunho desconhecido lido da persistência.
+    #[error("estado de rascunho inválido: {0:?} (esperado `draft` ou `consolidated`)")]
+    InvalidDraftState(String),
 }
 
 /// Erros do motor de grade (`ta-engine`), tipados — nunca uma `String` solta.

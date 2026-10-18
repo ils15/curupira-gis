@@ -22,6 +22,8 @@ ta-gis.workspace = true
 sqlx.workspace = true
 time.workspace = true
 tokio.workspace = true
+# Mock de `ProjectRepo` no teste de `resolve_project` (F12).
+async-trait.workspace = true
 # Geometria + JSON dos dados sintéticos do `seed-demo` (células da grade e
 # atributos de classe) — não são reexportados por ta-core.
 geo-types.workspace = true

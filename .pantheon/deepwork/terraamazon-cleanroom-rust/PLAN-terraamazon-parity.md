@@ -155,9 +155,16 @@ Base **domain-first**: o esqueleto do fluxo de monitoramento.
 - **Classificação básica** executada pelo motor, com estado retomável.
 - Comandos de CLI para enfileirar/acompanhar.
 
-**Migração:** `0011_queue`.
+**Migração:** `0012_queue`.
 **Tabelas:** `tasks`, `processes`, `cell_log`.
 **Crates:** `ta-engine` (execução), `ta-db`, `ta-cli`.
+
+**Requisito de integridade multi-projeto (registrado na revisão da Fase 2,
+2026-10-18 — implementar NESTA fase):** triggers `BEFORE INSERT/UPDATE`
+comparando `project_id` entre pais e filhos — `rules.class_id ↔
+rulesets.project_id` (regra de projeto cruzado hoje é barrada só no
+repositório), `classes.class_group_id` e `classes.parent_id` — garantia no
+banco para a fila de processos escrever sem corruption cruzada.
 
 **Critérios de aceite**
 - Enfileirar processo por célula; executar; registrar log por célula; refletir estado (pendente/em execução/concluído/erro).
@@ -171,7 +178,7 @@ Base **domain-first**: o esqueleto do fluxo de monitoramento.
 - Registro de **scenes** e vínculo com o projeto (`project_scenes`).
 - **Import/Export** de exchange do fluxo.
 
-**Migração:** `0012_scenes`.
+**Migração:** `0013_scenes`.
 **Tabelas:** `scenes`, `project_scenes`.
 **Crates:** `ta-core`, `ta-db`, `ta-gis` (IO), `ta-cli`.
 
@@ -226,8 +233,9 @@ Sequência (continua `0001`–`0004` já existentes):
 | `0008_cell_validity` | 1 | trigger `cells_geom_validity` (rejeita célula inválida; mesmo gate de `features`) |
 | `0009_classes` | 2 | `classes`, `class_groups`, `draft_layers` |
 | `0010_rules` | 2 | `rules`, `rulesets` |
-| `0011_queue` | 3 | `tasks`, `processes`, `cell_log` |
-| `0012_scenes` | 4 | `scenes`, `project_scenes` |
+| `0011_rule_class_restrict` | 2 | FK `rules.class_id` recriada com `ON DELETE RESTRICT` (nada de cascata silenciosa; `class delete --force` é o caminho explícito) |
+| `0012_queue` | 3 | `tasks`, `processes`, `cell_log` |
+| `0013_scenes` | 4 | `scenes`, `project_scenes` |
 
 Todas usam **nomes próprios, sem prefixo legado** (Decisão 2). Geometria em **EPSG:4674**; a grade é configurável em **qualquer EPSG** (resolução/origem nas unidades do SRS escolhido) e a **área** usa o SRS de `area_settings.srs_id` (Decisão 4 retificada em 2026-10-18).
 
