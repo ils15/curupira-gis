@@ -27,6 +27,31 @@ pub enum Error {
     #[error("id inválido (esperado UUID textual): {0:?}")]
     InvalidId(String),
 
+    /// EPSG desconhecido: não existe em `spatial_ref_sys`.
+    ///
+    /// A grade aceita **qualquer** EPSG (Decisão 4, retificada em 2026-10-18);
+    /// o valor precisa apenas existir na tabela de referência do PostGIS. A FK
+    /// `cell_layers.srid → spatial_ref_sys(srid)` é a garantia no banco; esta
+    /// variante dá a mensagem acionável na validação em código.
+    #[error(
+        "EPSG {0} desconhecido: não está em spatial_ref_sys; informe um código \
+         EPSG válido (ex.: 4674 SIRGAS 2000 em graus, 5880 Policônica SIRGAS \
+         2000 em metros)"
+    )]
+    UnknownSrid(i32),
+
+    /// O SRS declarado das geometrias de entrada difere do SRS da camada.
+    ///
+    /// `cells` são geradas no SRS da grade (`cell_layers.srid`) e reprojetadas
+    /// para 4674 no insert. Se o chamador mentir sobre o SRS de entrada, o
+    /// `ST_Transform` produziria lixo **sem erro**; esta variante impede isso.
+    #[error(
+        "SRS de entrada EPSG:{input} ≠ srid da camada de células EPSG:{layer}: \
+         as células precisam estar expressas no SRS em que a grade foi definida \
+         (o mesmo de `cell_layers.srid`); reprojete-as antes de inserir"
+    )]
+    SridLayerMismatch { input: i32, layer: i32 },
+
     /// Tipo de geometria sem representação vetorial na persistência.
     #[error("geom_type sem representação vetorial na persistência: {0:?}")]
     UnsupportedGeomType(GeomType),

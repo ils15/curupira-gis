@@ -5,7 +5,7 @@
 - **Aprovação:** 2026-10-18
 - **Repositório:** `/home/jovyan/testes/terraamazon-cleanroom-rust` (publicado em https://github.com/ils15/curupira-gis)
 - **Relação com os registros anteriores:** **não substitui** `PLAN.md` (Gate 1, v0.1.0→v0.2.2) nem as seções históricas de `STATUS.md`. É um **re-planejamento** que reusa o que já existe (workspace, licença dual, barreira clean-room, PostGIS/`sqlx`, `ta-cli`, `ta-gui`) e renumera as fases do **fluxo de monitoramento** de `0` a `6`.
-- **Estado:** **Fase 0 EM IMPLEMENTAÇÃO**. Fases 1–6 **pendentes**.
+- **Estado:** **Fase 0 concluída**; **Fase 1 implementada e revisada** (Themis, 2026-10-18) e **aguardando commit**. Fases 2–6 **pendentes**.
 
 > **Proveniência / barreira clean-room.** Este documento é derivado **apenas** de documentação pública e especificação comportamental (ver `CONTRIBUTING.md`, linhas 16–29). **Nenhum** conteúdo derivado de engenharia reversa do produto legado está aqui — nem offsets, nem assembly/bytecode, nem pseudocódigo decompilado, nem schema/SQL extraído de binário, nem `hex dumps`, nem símbolos internos. As únicas menções ao material legado são de **proibição e remoção** (Decisão 1).
 
@@ -80,7 +80,7 @@ Fase 0 ──► Fase 1 ──► Fase 2 ──► Fase 3 ──► Fase 5 ─�
 
 > **Granularidade.** Os itens de escopo, o DAG e as migrações abaixo estão fixados na aprovação. O detalhamento interno de cada fase (ordem de tarefas, nomes de comandos, campos exatos) é **derivado** do escopo aprovado e deve ser **confirmado no gate da própria fase** — não é inventado aqui como se estivesse aprovado.
 
-### Fase 0 — Usabilidade ponta a ponta — **EM IMPLEMENTAÇÃO**
+### Fase 0 — Usabilidade ponta a ponta — **CONCLUÍDA**
 
 Tornar o projeto utilizável de ponta a ponta **antes** de aprofundar o domínio.
 
@@ -117,17 +117,17 @@ Base **domain-first**: o esqueleto do fluxo de monitoramento.
 - Comandos de CLI para criar/consultar o fluxo.
 - **`ta-engine` criado** (crate puro) com grid/resolução/área.
 
-**Migrações:** `0005_phases`, `0006_aoi_cells`.
+**Migrações:** `0005_phases`, `0006_aoi_cells`, `0007_grid_srid` (retificação da Decisão 4 em 2026-10-18).
 **Tabelas (nomes próprios, Decisão 2):** `phases`, `area_settings`, `app_meta`; `aoi_layers`, `cell_layers`, `cells`, `blocked_cells`.
 **Crates:** `ta-core` (tipos), **`ta-engine` (novo)**, `ta-db` (repos + migrações), `ta-cli`.
 
 **Critérios de aceite**
 - Criar projeto e fase; definir AOI; **gerar grid de células**; **bloquear** células.
-- Geometria persistida em **EPSG:4674**; **área** e **definição de resolução de célula** em **EPSG:5880** (Policônica SIRGAS2000) ou `geography` (Decisão 4).
+- Geometria persistida em **EPSG:4674**; a grade é configurável em **qualquer EPSG** (resolução/origem nas unidades do SRS escolhido) e a **área** usa o SRS de `area_settings.srs_id` (default EPSG:5880) — Decisão 4 retificada em 2026-10-18.
 - Motor puro coberto por testes unitários (sem DB); persistência coberta por integração PG.
 
 **Riscos**
-- Definição de **resolução de célula** (5880 vs `geography`) — precisa de critério objetivo e teste.
+- Escolha do SRS da grade (graus vs metros) — critério objetivo agora é do usuário (`--srid`), com teste de paridade motor↔PostGIS.
 - Performance do grid em AOI grande (não otimizar antes de medir).
 
 ### Fase 2 — Classes e regras (rules/rulesets)
@@ -137,7 +137,7 @@ Base **domain-first**: o esqueleto do fluxo de monitoramento.
 - **Regras** e **rulesets** (versionados).
 - Avaliação de regra sobre célula **no motor puro** (testável sem DB/GUI).
 
-**Migrações:** `0007_classes`, `0008_rules`.
+**Migrações:** `0009_classes`, `0010_rules`.
 **Tabelas:** `classes`, `class_groups`, `draft_layers`; `rules`, `rulesets`.
 **Crates:** `ta-core`, `ta-engine` (avaliação), `ta-db`, `ta-cli`.
 
@@ -155,7 +155,7 @@ Base **domain-first**: o esqueleto do fluxo de monitoramento.
 - **Classificação básica** executada pelo motor, com estado retomável.
 - Comandos de CLI para enfileirar/acompanhar.
 
-**Migração:** `0009_queue`.
+**Migração:** `0011_queue`.
 **Tabelas:** `tasks`, `processes`, `cell_log`.
 **Crates:** `ta-engine` (execução), `ta-db`, `ta-cli`.
 
@@ -171,7 +171,7 @@ Base **domain-first**: o esqueleto do fluxo de monitoramento.
 - Registro de **scenes** e vínculo com o projeto (`project_scenes`).
 - **Import/Export** de exchange do fluxo.
 
-**Migração:** `0010_scenes`.
+**Migração:** `0012_scenes`.
 **Tabelas:** `scenes`, `project_scenes`.
 **Crates:** `ta-core`, `ta-db`, `ta-gis` (IO), `ta-cli`.
 
@@ -222,12 +222,27 @@ Sequência (continua `0001`–`0004` já existentes):
 |---|---|---|
 | `0005_phases` | 1 | `phases`, `area_settings`, `app_meta` |
 | `0006_aoi_cells` | 1 | `aoi_layers`, `cell_layers`, `cells`, `blocked_cells` |
-| `0007_classes` | 2 | `classes`, `class_groups`, `draft_layers` |
-| `0008_rules` | 2 | `rules`, `rulesets` |
-| `0009_queue` | 3 | `tasks`, `processes`, `cell_log` |
-| `0010_scenes` | 4 | `scenes`, `project_scenes` |
+| `0007_grid_srid` | 1 | `cell_layers.srid` (SRS da grade; retificação da Decisão 4, 2026-10-18) |
+| `0008_cell_validity` | 1 | trigger `cells_geom_validity` (rejeita célula inválida; mesmo gate de `features`) |
+| `0009_classes` | 2 | `classes`, `class_groups`, `draft_layers` |
+| `0010_rules` | 2 | `rules`, `rulesets` |
+| `0011_queue` | 3 | `tasks`, `processes`, `cell_log` |
+| `0012_scenes` | 4 | `scenes`, `project_scenes` |
 
-Todas usam **nomes próprios, sem prefixo legado** (Decisão 2). Geometria em **EPSG:4674**; área/resolução de célula em **EPSG:5880** ou `geography` (Decisão 4).
+Todas usam **nomes próprios, sem prefixo legado** (Decisão 2). Geometria em **EPSG:4674**; a grade é configurável em **qualquer EPSG** (resolução/origem nas unidades do SRS escolhido) e a **área** usa o SRS de `area_settings.srs_id` (Decisão 4 retificada em 2026-10-18).
+
+**Backfill da 0007 (intencional):** em bancos que aplicaram a `0006` da
+iteração anterior (antes de `cell_layers.srid` existir), a `0007` adiciona a
+coluna com `DEFAULT 4674` e faz backfill de todas as linhas para 4674. É o
+valor correto para grades antigas (todas eram em graus) e bancos de dev podem
+ser recriados; não há migração de dados a fazer.
+
+**Semântica de borda do recorte (para quem reimplementar em SQL):** o
+`generate_grid` inclui a célula pelo centro e trata o envelope como
+**semiaberto** `[x_min, x_max) × [y_min, y_max)` — aresta de máximo fica fora.
+`ST_Contains`/`ST_Covers` do PostGIS **não** são equivalentes nessa fronteira
+(ambos cobrem o limite), então o recorte em SQL deve usar comparação
+semiaberta (`>=` no mínimo, `<` no máximo), nunca essas funções.
 
 ## 8. Metas de qualidade
 
@@ -241,15 +256,20 @@ Todas usam **nomes próprios, sem prefixo legado** (Decisão 2). Geometria em **
 | **1 (a)** | A paridade é validada **apenas** por **documentação pública + observação comportamental**. É **PROIBIDO** usar engenharia reversa do produto legado. Por política clean-room (`CONTRIBUTING.md`), **todo** o material proibido foi **removido do disco em 2026-10-18** por decisão do usuário. Nenhum insumo derivado de engenharia reversa do produto legado pode entrar neste repositório. |
 | **2 (sim)** | **Nomes de tabela próprios**, sem prefixo legado: `phases`, `aoi_layers`, `cell_layers`, `cells`, `blocked_cells`, `classes`, `class_groups`, `rules`, `rulesets`, `tasks`, `processes`, `cell_log`, `draft_layers`, `scenes`, `project_scenes`, `area_settings`, `app_meta`. |
 | **3** | **Motor de domínio em crate NOVO e puro `ta-engine`** — depende **apenas** de `ta-core` + `geo-types`; **sem IO, sem DB, sem GUI**. |
-| **4** | Geometria persistida em **EPSG:4674**; **cálculo de ÁREA** e **definição de RESOLUÇÃO de célula** em **EPSG:5880** (Policônica SIRGAS2000) **ou** `geography`. |
+| **4** | Decisão 4 (retificada pelo usuário em 2026-10-18): a grade é configurável em QUALQUER EPSG — resolução e origem nas unidades do SRS escolhido; armazenamento canônico das células em EPSG:4674; cálculo de área no SRS de `area_settings.srs_id` (default EPSG:5880). Não há escolha excludente entre graus e metros. |
 | **5** | Provisionamento na **Fase 0** via `scripts/dev-up.sh` **autodetectando docker**, com **fallback conda** (`scripts/test-pg.sh`). |
 
 **Diagnóstico que fundamenta o plano:** projeto GUI-first (**12.270** linhas de UI) sobre domínio raso (**3 tabelas**: `projects`/`layers`/`features`; `ta-core` com **419** linhas) ⇒ a paridade **exige** abordagem **domain-first**.
 
 ## 10. Registro de não-progresso (honestidade)
 
-- Apenas a **Fase 0** está **EM IMPLEMENTAÇÃO**.
-- Fases **1, 2, 3, 4, 5 e 6**: **não iniciadas**.
+- **Fase 0**: concluída (2026-10-17/18).
+- **Fase 1**: **implementada e revisada** (Themis: aprovada com ressalvas em
+  2026-10-18); os achados de fechamento foram aplicados e a fase **aguarda
+  commit** (migrações `0005`–`0008`, CLI `phase`/`aoi`/`grid`/`cell`, seed).
+- Fases **2, 3, 4, 5 e 6**: **não iniciadas**.
+- Dívidas de teste adiadas para o hardening da Fase 6: dedup de helpers de
+  teste (n7), n8 e n13.
 - Nada foi commitado por este registro (o usuário faz commits manualmente).
 - Nenhum ADR foi criado (não solicitado).
 
@@ -260,3 +280,8 @@ Todas usam **nomes próprios, sem prefixo legado** (Decisão 2). Geometria em **
 3. **UI absorver regra de domínio** — mitigado pela Decisão 3 (`ta-engine` puro).
 4. **Deriva de versões** (GDAL/PostGIS/rust) — pinar e verificar no `doctor`.
 5. **Escopo inflando além do IN** (§3.1) — itens OUT (§3.2) permanecem fora.
+6. **FK para `spatial_ref_sys` exige privilégio** — a `0007` cria
+   `cell_layers.srid → spatial_ref_sys(srid)`. Se o PostGIS foi criado por
+   outro role, a migração falha com `permission denied` e é preciso
+   `GRANT REFERENCES ON spatial_ref_sys TO <app_role>;` (ou criar a extensão
+   com o role da aplicação) — ver `INSTALL.md`.

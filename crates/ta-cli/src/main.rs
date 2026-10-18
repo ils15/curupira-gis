@@ -13,6 +13,8 @@
 //!   dados do legado (Fase 1; ver `migrate.rs`).
 //! - **doctor** — diagnóstico do ambiente (banco/PostGIS/migrações/GDAL).
 //! - **seed-demo** — projeto `demo` com dados sintéticos (ver `seed.rs`).
+//! - **phase/aoi/grid/cell** — fluxo de monitoramento (Fase 1): fases, AOI,
+//!   grade de células (motor puro `ta-engine`) e células bloqueadas.
 //!
 //! DSN: `--dsn` > env `TA_PG_DSN` > `postgres://ta:ta@localhost:5432/ta`.
 
@@ -25,6 +27,7 @@ use ta_db::pool::{self, DbConfig};
 
 mod doctor;
 mod dsn;
+mod flow;
 mod import;
 mod migrate;
 mod seed;
@@ -183,7 +186,7 @@ enum Cmd {
         #[arg(long)]
         dsn: Option<String>,
     },
-    /// Cria o projeto `demo` com dados sintéticos (AOI + pontos + grade provisória).
+    /// Cria o projeto `demo` com dados sintéticos (AOI + pontos + grade real).
     SeedDemo {
         /// Projeto alvo (criado se não existir).
         #[arg(long, default_value = seed::DEMO_PROJECT)]
@@ -195,6 +198,155 @@ enum Cmd {
         #[arg(long, default_value = "testdata/monitoring/points_classes.csv")]
         points: PathBuf,
         /// DSN do banco (senão env TA_PG_DSN / default compose).
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Fase do fluxo de monitoramento (Fase 1): criar/listar.
+    Phase {
+        #[command(subcommand)]
+        cmd: PhaseCmd,
+    },
+    /// AOI — vincula uma camada existente como área de interesse.
+    Aoi {
+        #[command(subcommand)]
+        cmd: AoiCmd,
+    },
+    /// Grade de células — gera a grade da AOI e consulta contagem/extensão.
+    Grid {
+        #[command(subcommand)]
+        cmd: GridCmd,
+    },
+    /// Células — bloqueia e lista células bloqueadas.
+    Cell {
+        #[command(subcommand)]
+        cmd: CellCmd,
+    },
+}
+
+/// Subcomandos de `phase`.
+#[derive(Debug, Subcommand)]
+enum PhaseCmd {
+    /// Cria uma fase no projeto.
+    Create {
+        /// Projeto alvo: id (UUID) ou nome — criado se o nome não existir.
+        #[arg(long)]
+        project: String,
+        /// Nome da fase (único no projeto).
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        /// Ordem de exibição (padrão 0).
+        #[arg(long, default_value_t = 0)]
+        sort_order: i32,
+        /// Marca a fase como bloqueadora de células.
+        #[arg(long)]
+        cell_blocker: bool,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Lista as fases do projeto.
+    List {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+}
+
+/// Subcomandos de `aoi`.
+#[derive(Debug, Subcommand)]
+enum AoiCmd {
+    /// Vincula uma camada existente como AOI do projeto.
+    Create {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Id (UUID) da camada que contém a geometria da AOI.
+        #[arg(long)]
+        layer: String,
+        /// Coluna de atributo que identifica cada feição da AOI.
+        #[arg(long)]
+        id_column: Option<String>,
+        /// Fase (id) dona da AOI; precisa ser do mesmo projeto.
+        #[arg(long)]
+        phase: Option<String>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+}
+
+/// Subcomandos de `grid`.
+#[derive(Debug, Subcommand)]
+enum GridCmd {
+    /// Gera a grade da AOI (motor puro) e persiste camada + células.
+    Create {
+        /// Id (UUID) do vínculo de AOI (`aoi_layers.id`).
+        #[arg(long)]
+        aoi_layer: String,
+        /// Resolução da grade NAS UNIDADES de --srid (graus se geográfico,
+        /// metros se projetado).
+        #[arg(long)]
+        resolution: f64,
+        /// Origem X do alinhamento (padrão: min_x da AOI), nas unidades de --srid.
+        // `allow_hyphen_values`: longitude/latitude negativas são o caso comum
+        // (ex.: `--origin-x -52.2`); sem isso só `--origin-x=-52.2` passaria.
+        #[arg(long, allow_hyphen_values = true)]
+        origin_x: Option<f64>,
+        /// Origem Y do alinhamento (padrão: min_y da AOI), nas unidades de --srid.
+        // Mesmo motivo do `origin_x` (ex.: `--origin-y -3.2`).
+        #[arg(long, allow_hyphen_values = true)]
+        origin_y: Option<f64>,
+        /// EPSG do SRS em que --resolution/--origin-* são expressos: graus se
+        /// geográfico (ex.: 4674 SIRGAS 2000), metros se projetado (ex.: 5880
+        /// Policônica SIRGAS 2000). As células são sempre persistidas em
+        /// EPSG:4674 (armazenamento canônico).
+        // `allow_hyphen_values`: sem isso, `--srid -1` seria lido como flag
+        // desconhecida por clap e só `--srid=-1` chegaria à validação, que é
+        // quem sabe explicar o erro.
+        #[arg(long, default_value_t = 4674, allow_hyphen_values = true)]
+        srid: i32,
+        /// Nome da camada de células (padrão `grade`).
+        #[arg(long)]
+        name: Option<String>,
+        /// Fase (id) dona da grade; precisa ser do mesmo projeto.
+        #[arg(long)]
+        phase: Option<String>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Mostra contagem, extensão e células bloqueadas da grade.
+    Info {
+        /// Id (UUID) da camada de células (`cell_layers.id`).
+        #[arg(long)]
+        cell_layer: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+}
+
+/// Subcomandos de `cell`.
+#[derive(Debug, Subcommand)]
+enum CellCmd {
+    /// Bloqueia uma célula da grade.
+    Block {
+        /// Id (UUID) da camada de células.
+        #[arg(long)]
+        cell_layer: String,
+        /// Identificador da célula (`"<col>_<row>"`).
+        #[arg(long)]
+        cell_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Lista as células bloqueadas da grade.
+    ListBlocked {
+        /// Id (UUID) da camada de células.
+        #[arg(long)]
+        cell_layer: String,
         #[arg(long)]
         dsn: Option<String>,
     },
@@ -303,6 +455,81 @@ async fn main() -> ExitCode {
             })
             .await
         }
+        Cmd::Phase { cmd } => match cmd {
+            PhaseCmd::Create {
+                project,
+                name,
+                description,
+                sort_order,
+                cell_blocker,
+                dsn,
+            } => {
+                flow::phase_create(
+                    dsn.as_deref(),
+                    &project,
+                    &name,
+                    description,
+                    sort_order,
+                    cell_blocker,
+                )
+                .await
+            }
+            PhaseCmd::List { project, dsn } => flow::phase_list(dsn.as_deref(), &project).await,
+        },
+        Cmd::Aoi { cmd } => match cmd {
+            AoiCmd::Create {
+                project,
+                layer,
+                id_column,
+                phase,
+                dsn,
+            } => {
+                flow::aoi_create(
+                    dsn.as_deref(),
+                    &project,
+                    &layer,
+                    id_column,
+                    phase.as_deref(),
+                )
+                .await
+            }
+        },
+        Cmd::Grid { cmd } => match cmd {
+            GridCmd::Create {
+                aoi_layer,
+                resolution,
+                origin_x,
+                origin_y,
+                srid,
+                name,
+                phase,
+                dsn,
+            } => {
+                flow::grid_create(
+                    dsn.as_deref(),
+                    &aoi_layer,
+                    resolution,
+                    origin_x,
+                    origin_y,
+                    srid,
+                    name,
+                    phase.as_deref(),
+                )
+                .await
+            }
+            GridCmd::Info { cell_layer, dsn } => flow::grid_info(dsn.as_deref(), &cell_layer).await,
+        },
+        Cmd::Cell { cmd } => match cmd {
+            CellCmd::Block {
+                cell_layer,
+                cell_id,
+                reason,
+                dsn,
+            } => flow::cell_block(dsn.as_deref(), &cell_layer, &cell_id, reason).await,
+            CellCmd::ListBlocked { cell_layer, dsn } => {
+                flow::cell_list_blocked(dsn.as_deref(), &cell_layer).await
+            }
+        },
     };
 
     match result {

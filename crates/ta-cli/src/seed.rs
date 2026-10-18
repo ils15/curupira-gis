@@ -1,35 +1,33 @@
 //! `ta-cli seed-demo` — projeto de demonstração com dados **sintéticos**.
 //!
-//! Cria (ou reutiliza) o projeto `demo` com três camadas, usando apenas o
-//! schema atual (`projects`, `layers`, `features`):
+//! Cria (ou reutiliza) o projeto `demo` com o **schema real** da Fase 1:
 //!
 //! - `demo_aoi` — o polígono de `testdata/monitoring/aoi.geojson` (EPSG:4674),
 //!   1 feature; o catálogo das classes do demo vai no JSONB de atributos dela
-//!   (`attrs.classes`), já que a tabela `classes` só chega na Fase 1;
+//!   (`attrs.classes`), já que a tabela `classes` chega na Fase 2;
 //! - `demo_pontos` — os pontos de `testdata/monitoring/points_classes.csv`
 //!   (CSV-XY, SRID declarado 4674) com o atributo `classe`;
-//! - `demo_grade` — **PROVISÓRIO**: grade 2×2 derivada do bbox da AOI.
+//! - **AOI real** (`aoi_layers`) apontando `demo_aoi`;
+//! - **grade real** (`cell_layers` + `cells`): resolvida por [`GRID_RESOLUTION`]
+//!   graus com o motor puro [`ta_engine::generate_grid`] e persistida.
 //!
-//! ## Por que a grade é provisória
-//!
-//! As tabelas `cells`/`aoi_layers`/`cell_layers` são da Fase 1. Até lá a grade
-//! vive como features (um polígono por célula, com `attrs.provisorio = true`),
-//! o que já dá conteúdo ao mapa sem inventar schema. Quando a Fase 1 entrar,
-//! [`seed_provisional_grid`] sai e o seed passa a escrever nas tabelas reais.
-//!
-//! Idempotência: cada camada é resolvida **por nome** dentro do projeto; se já
-//! existe e tem features, nada é inserido de novo (rodar duas vezes não
-//! duplica). Camada existente porém vazia (execução interrompida) é
-//! preenchida.
+//! Idempotência: cada camada é resolvida **por nome** dentro do projeto; o
+//! vínculo de AOI é resolvido por camada; a grade é resolvida por nome e só é
+//! (re)preenchida se estiver vazia. Rodar duas vezes não duplica nada.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use geo_types::{Geometry, LineString, Polygon};
+use geo_types::MultiPolygon;
 use serde_json::json;
+use sqlx::PgPool;
+use ta_core::aoi::AoiLayer;
+use ta_core::cell::{DEFAULT_CELL_SRID, GridSpec};
 use ta_core::feature::Feature;
 use ta_core::layer::{GeomType, Layer};
 use ta_db::repo::{FeatureRepo, LayerRepo, PgFeatureRepo, PgLayerRepo, PgProjectRepo};
+use ta_db::repo_aoi::{AoiLayerRepo, PgAoiLayerRepo};
+use ta_db::repo_cell::{CellLayerRepo, CellRepo, PgCellLayerRepo, PgCellRepo};
 use ta_gis::normalizer;
 use ta_gis::reader::{CsvEncoding, CsvXyOptions, ReadOptions};
 
@@ -37,14 +35,12 @@ use ta_gis::reader::{CsvEncoding, CsvXyOptions, ReadOptions};
 pub const AOI_LAYER: &str = "demo_aoi";
 /// Camada dos pontos com atributo de classe.
 pub const POINTS_LAYER: &str = "demo_pontos";
-/// Camada da grade — **provisória** (Fase 1 substitui pela tabela `cells`).
-pub const GRID_LAYER: &str = "demo_grade";
+/// Nome da camada de células (grade real da Fase 1).
+pub const GRID_NAME: &str = "demo_grade";
+/// Resolução da grade do demo, **em graus** (EPSG:4674 é geográfico).
+pub const GRID_RESOLUTION: f64 = 0.005;
 /// Projeto do demo.
 pub const DEMO_PROJECT: &str = "demo";
-
-/// Células da grade provisória: 2 linhas × 2 colunas.
-const GRID_ROWS: usize = 2;
-const GRID_COLS: usize = 2;
 
 /// Argumentos do `seed-demo` (decodificados pelo clap em `main.rs`).
 #[derive(Debug, Clone)]
@@ -61,12 +57,25 @@ pub struct SeedArgs {
 
 /// Resultado de uma camada do seed.
 struct Seeded {
+    /// Id (UUID) da camada persistida.
+    id: String,
     geom_type: GeomType,
     /// Features do lote (o que o seed representa).
     total: usize,
     /// Linhas efetivamente inseridas nesta execução.
     inserted: u64,
     /// `true` quando a camada já existia preenchida (nada foi feito).
+    skipped: bool,
+}
+
+/// Resultado da grade real.
+struct GridOutcome {
+    layer_id: String,
+    /// Total de células na camada após a execução.
+    count: u64,
+    /// Células inseridas nesta execução.
+    inserted: u64,
+    /// `true` quando a grade já existia preenchida.
     skipped: bool,
 }
 
@@ -96,20 +105,10 @@ pub async fn run(args: SeedArgs) -> Result<(), String> {
     if aoi_data.features.is_empty() {
         return Err(format!("{}: sem geometria de AOI", args.aoi.display()));
     }
-    let aoi_bbox = normalizer::bbox_of(&aoi_data.features).ok_or_else(|| {
-        format!(
-            "{}: não consegui calcular o bbox da AOI",
-            args.aoi.display()
-        )
-    })?;
-
-    // Catálogo das classes no JSONB da AOI (schema atual não tem tabela de
-    // classes — ver doc do módulo).
+    // Catálogo das classes no JSONB da AOI (a tabela `classes` é da Fase 2).
     annotate_aoi(&mut aoi_data.features, &classes, &args.aoi);
-
-    // PROVISÓRIO (Fase 0 → Fase 1): grade mínima como features; cada célula
-    // leva `attrs.provisorio = true`.
-    let grid_features = seed_provisional_grid(aoi_bbox)?;
+    let area = crate::flow::multipolygon_from_features(&aoi_data.features)
+        .map_err(|e| format!("{}: {e}", args.aoi.display()))?;
 
     let pool = crate::open_pool(args.dsn.as_deref()).await?;
     let projects = PgProjectRepo::new(pool.clone());
@@ -137,23 +136,16 @@ pub async fn run(args: SeedArgs) -> Result<(), String> {
         canonical(&args.points),
     )
     .await?;
-    let grid = ensure_layer(
-        &layers,
-        &feature_repo,
-        &project.id,
-        GRID_LAYER,
-        grid_features,
-        format!("seed://{}/{}", project.name, GRID_LAYER),
-    )
-    .await?;
+
+    let aoi_link = ensure_aoi_layer(&pool, &project.id, &aoi.id, None).await?;
+    let grid = ensure_grid(&pool, &project.id, &aoi_link.id, &area).await?;
 
     print_report(
         &project.name,
-        &[
-            (AOI_LAYER, &aoi),
-            (POINTS_LAYER, &points),
-            (GRID_LAYER, &grid),
-        ],
+        &aoi,
+        &points,
+        &aoi_link,
+        &grid,
         &classes,
         &args.aoi,
     );
@@ -182,20 +174,27 @@ async fn ensure_layer(
         .into_iter()
         .find(|l| l.name == name);
 
-    let (inserted, skipped) = match existing {
+    match existing {
         Some(layer) => {
             let n = feature_repo
                 .count(&layer.id)
                 .await
                 .map_err(|e| format!("contando `{name}`: {e}"))?;
-            if n > 0 {
+            let (inserted, skipped) = if n > 0 {
                 (0, true)
             } else {
                 (
                     insert_and_bbox(feature_repo, layers, &layer.id, name, feats).await?,
                     false,
                 )
-            }
+            };
+            Ok(Seeded {
+                id: layer.id,
+                geom_type,
+                total,
+                inserted,
+                skipped,
+            })
         }
         None => {
             let layer = layers
@@ -209,19 +208,16 @@ async fn ensure_layer(
                 })
                 .await
                 .map_err(|e| format!("criando camada `{name}`: {e}"))?;
-            (
-                insert_and_bbox(feature_repo, layers, &layer.id, name, feats).await?,
-                false,
-            )
+            let inserted = insert_and_bbox(feature_repo, layers, &layer.id, name, feats).await?;
+            Ok(Seeded {
+                id: layer.id,
+                geom_type,
+                total,
+                inserted,
+                skipped: false,
+            })
         }
-    };
-
-    Ok(Seeded {
-        geom_type,
-        total,
-        inserted,
-        skipped,
-    })
+    }
 }
 
 async fn insert_and_bbox(
@@ -240,6 +236,92 @@ async fn insert_and_bbox(
         .await
         .map_err(|e| e.to_string())?;
     Ok(inserted)
+}
+
+/// Resolve (ou cria) o vínculo de AOI do projeto para a camada dada.
+async fn ensure_aoi_layer(
+    pool: &PgPool,
+    project_id: &str,
+    layer_id: &str,
+    id_column: Option<String>,
+) -> Result<AoiLayer, String> {
+    let repo = PgAoiLayerRepo::new(pool.clone());
+    if let Some(existing) = repo
+        .list_for_project(project_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|a| a.layer_id == layer_id)
+    {
+        return Ok(existing);
+    }
+    repo.create(&AoiLayer::new(project_id, layer_id, id_column))
+        .await
+        .map_err(|e| format!("criando vínculo de AOI: {e}"))
+}
+
+/// Resolve (ou cria) a grade real do demo e garante que ela tenha células.
+async fn ensure_grid(
+    pool: &PgPool,
+    project_id: &str,
+    aoi_layer_id: &str,
+    area: &MultiPolygon<f64>,
+) -> Result<GridOutcome, String> {
+    let [origin_x, origin_y] = ta_engine::aoi_bbox(area)
+        .map(|b| [b[0], b[1]])
+        .ok_or("AOI sem envelope para alinhar a grade")?;
+    let spec = GridSpec::new(GRID_RESOLUTION, origin_x, origin_y, DEFAULT_CELL_SRID);
+
+    let cell_layers = PgCellLayerRepo::new(pool.clone());
+    let cells = PgCellRepo::new(pool.clone());
+
+    if let Some(existing) = cell_layers
+        .list_for_project(project_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|c| c.name == GRID_NAME)
+    {
+        let n = cells
+            .count(&existing.id)
+            .await
+            .map_err(|e| format!("contando células: {e}"))?;
+        if n > 0 {
+            return Ok(GridOutcome {
+                layer_id: existing.id,
+                count: n,
+                inserted: 0,
+                skipped: true,
+            });
+        }
+        // Mesma política de projeto do `grid create` (o caminho do seed incluído).
+        crate::flow::enforce_max_cells(pool, project_id, area, &spec).await?;
+        let generated = crate::flow::generate_cells(area, &spec)?;
+        let inserted = cells
+            .bulk_insert(&existing.id, &generated, spec.srid)
+            .await
+            .map_err(|e| format!("gravando células: {e}"))?;
+        let total = cells.count(&existing.id).await.map_err(|e| e.to_string())?;
+        return Ok(GridOutcome {
+            layer_id: existing.id,
+            count: total,
+            inserted,
+            skipped: false,
+        });
+    }
+
+    let (layer, inserted) =
+        crate::flow::persist_grid(pool, project_id, aoi_layer_id, GRID_NAME, &spec, area, None)
+            .await?;
+    // `inserted` pode ser menor que o total (`ON CONFLICT DO NOTHING`); o
+    // relatório mostra o que **existe** na camada após a execução.
+    let count = cells.count(&layer.id).await.map_err(|e| e.to_string())?;
+    Ok(GridOutcome {
+        layer_id: layer.id,
+        count,
+        inserted,
+        skipped: false,
+    })
 }
 
 /// Anota os atributos da AOI: classes do demo + origem do arquivo.
@@ -263,56 +345,17 @@ pub(crate) fn classes_of(features: &[Feature]) -> BTreeSet<String> {
         .collect()
 }
 
-/// **PROVISÓRIO** — grade `GRID_ROWS × GRID_COLS` sobre o bbox da AOI.
-///
-/// Um polígono por célula, com `attrs = {cell_id, row, col, provisorio}`.
-/// A Fase 1 substitui isto pela tabela `cells` (AOI/célula/camada).
-fn seed_provisional_grid(bbox: [f64; 4]) -> Result<Vec<Feature>, String> {
-    let [min_x, min_y, max_x, max_y] = bbox;
-    let width = max_x - min_x;
-    let height = max_y - min_y;
-    if !(width > 0.0 && height > 0.0) {
-        return Err(format!(
-            "bbox degenerado para a grade provisória: [{min_x}, {min_y}, {max_x}, {max_y}]"
-        ));
-    }
-    let step_x = width / GRID_COLS as f64;
-    let step_y = height / GRID_ROWS as f64;
-
-    let mut cells = Vec::with_capacity(GRID_ROWS * GRID_COLS);
-    for row in 0..GRID_ROWS {
-        for col in 0..GRID_COLS {
-            let x0 = min_x + step_x * col as f64;
-            let y0 = min_y + step_y * row as f64;
-            cells.push(Feature::new(
-                cell_polygon(x0, y0, x0 + step_x, y0 + step_y),
-                json!({
-                    "cell_id": format!("r{row}c{col}"),
-                    "row": row,
-                    "col": col,
-                    "provisorio": true,
-                }),
-            ));
-        }
-    }
-    Ok(cells)
-}
-
-/// Polígono fechado de uma célula (anel externo, sem buracos).
-fn cell_polygon(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Geometry<f64> {
-    let ring = LineString::from(vec![
-        (min_x, min_y),
-        (max_x, min_y),
-        (max_x, max_y),
-        (min_x, max_y),
-        (min_x, min_y),
-    ]);
-    Polygon::new(ring, Vec::new()).into()
-}
-
-fn print_report(project: &str, seeded: &[(&str, &Seeded)], classes: &BTreeSet<String>, aoi: &Path) {
+fn print_report(
+    project: &str,
+    aoi: &Seeded,
+    points: &Seeded,
+    aoi_link: &AoiLayer,
+    grid: &GridOutcome,
+    classes: &BTreeSet<String>,
+    aoi_path: &Path,
+) {
     println!("  {:<14} {:<10} {:>6}  estado", "camada", "tipo", "n");
-    for (name, layer) in seeded {
+    for (name, layer) in [(AOI_LAYER, aoi), (POINTS_LAYER, points)] {
         let state = if layer.skipped {
             "já existia (nada inserido)".to_owned()
         } else {
@@ -326,6 +369,18 @@ fn print_report(project: &str, seeded: &[(&str, &Seeded)], classes: &BTreeSet<St
             state,
         );
     }
+    let grid_state = if grid.skipped {
+        "já existia (nada inserido)".to_owned()
+    } else {
+        format!(
+            "grade real ({} células inseridas, resolução {GRID_RESOLUTION} graus)",
+            grid.inserted
+        )
+    };
+    println!(
+        "  {:<14} {:<10} {:>6}  {}",
+        GRID_NAME, "cells", grid.count, grid_state
+    );
     println!(
         "  classes ({}): {}",
         classes.len(),
@@ -335,7 +390,12 @@ fn print_report(project: &str, seeded: &[(&str, &Seeded)], classes: &BTreeSet<St
             classes.iter().cloned().collect::<Vec<_>>().join(", ")
         }
     );
-    println!("  aoi: {}", aoi.display());
+    println!(
+        "  aoi: {}  (aoi_layers {})",
+        aoi_path.display(),
+        aoi_link.id
+    );
+    println!("  grade: cell_layer {}", grid.layer_id);
     println!("seed-demo ok — conecte a GUI no banco e abra o projeto `{project}`.");
 }
 
@@ -350,40 +410,12 @@ fn canonical(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     fn point_with_class(id: i64, class: &str) -> Feature {
         Feature::new(
             geo_types::Point::new(-52.2, -3.2).into(),
             json!({"id": id, "classe": class}),
         )
-    }
-
-    #[test]
-    fn grade_provisoria_cobre_o_bbox_em_2x2() {
-        let cells = seed_provisional_grid([-52.20, -3.22, -52.14, -3.16]).expect("grade");
-        assert_eq!(cells.len(), 4, "2 linhas × 2 colunas");
-
-        let bbox = normalizer::bbox_of(&cells).expect("bbox das células");
-        assert!((bbox[0] - -52.20).abs() < 1e-12 && (bbox[2] - -52.14).abs() < 1e-12);
-        assert!((bbox[1] - -3.22).abs() < 1e-12 && (bbox[3] - -3.16).abs() < 1e-12);
-
-        let ids: Vec<String> = cells
-            .iter()
-            .map(|c| c.attrs["cell_id"].as_str().unwrap_or_default().to_owned())
-            .collect();
-        assert_eq!(ids, vec!["r0c0", "r0c1", "r1c0", "r1c1"]);
-        assert!(
-            cells
-                .iter()
-                .all(|c| c.attrs["provisorio"] == Value::Bool(true))
-        );
-    }
-
-    #[test]
-    fn bbox_degenerado_e_erro_legivel() {
-        let err = seed_provisional_grid([-52.0, -3.0, -52.0, -3.0]).unwrap_err();
-        assert!(err.contains("degenerado"), "erro: {err}");
     }
 
     #[test]

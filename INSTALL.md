@@ -157,6 +157,23 @@ a extensão se o usuário tiver permissão).
 
 ---
 
+## Privilégios do PostGIS (FK de `spatial_ref_sys`)
+
+A migração `0007_grid_srid` cria a FK `cell_layers.srid → spatial_ref_sys(srid)`.
+Se a extensão **PostGIS** foi criada por outro role (ex.: `postgres` no docker /
+instalador EDB) e a aplicação conecta com um role próprio, conceda a referência
+**antes** de migrar:
+
+```sql
+GRANT REFERENCES ON spatial_ref_sys TO <app_role>;
+```
+
+(Alternativa: criar a extensão com o role da aplicação, que fica como owner.)
+Sem o grant, `ta-cli migrate` falha na `0007` com
+`permission denied for table spatial_ref_sys`.
+
+---
+
 ## Primeiro run (todos os OS)
 
 ### Do fonte, em UM comando (recomendado)
@@ -204,6 +221,14 @@ Na GUI, a URL do banco já vem preenchida via `TA_DATABASE_URL`: clique
 5. (Opcional) **Basemap WMS** — ative a feature `wms` no build e configure
    um servidor WMS 1.3.0; o cache em disco evita recomprar tiles iguais.
 
+### Fluxo de monitoramento (CLI)
+
+`phase create`, `aoi create`, `grid create --resolution … [--srid …]`,
+`grid info`, `cell block` e `cell list-blocked` — com exemplos reais (0.005° →
+118 células; `--srid 5880 --resolution 500` → 144) e a nota de unidades por SRS
+— estão em
+[README › Fluxo de monitoramento (CLI)](README.md#fluxo-de-monitoramento-cli).
+
 ---
 
 ## Solução de problemas
@@ -217,3 +242,4 @@ Na GUI, a URL do banco já vem preenchida via `TA_DATABASE_URL`: clique
 | `no pg_hba.conf entry` / auth falha | senha/host errados no DSN | revise `TA_DATABASE_URL`; no Windows a senha é a do instalador EDB |
 | `postgis` extension ausente | StackBuilder não instalou PostGIS | rode `CREATE EXTENSION postgis;` como superuser |
 | Fonte/acentos quebrados no CSV | encoding ≠ UTF-8 | use `--encoding latin1` no import (CLI) |
+| `permission denied for table spatial_ref_sys` no `migrate` | FK da `0007` criada com PostGIS de outro role | `GRANT REFERENCES ON spatial_ref_sys TO <app_role>;` (ver seção acima) |

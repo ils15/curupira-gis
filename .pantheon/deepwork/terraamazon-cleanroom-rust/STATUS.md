@@ -5,7 +5,7 @@
 - **Gate 1:** **APROVADO** pelo usuário (2026-10-16)
 - **Modelo IA:** GLM-5.3-Flash (z.ai) para todos os agentes
 - **Repositório:** `/home/jovyan/testes/terraamazon-cleanroom-rust` → publicado em https://github.com/ils15/curupira-gis (commit `3b3eaa8`, tag `v0.1.0-alpha`, 2026-10-16)
-- **Re-planejamento (2026-10-18):** aprovado o plano de **paridade do fluxo de monitoramento** (fases `0`–`6`) → ver `.pantheon/deepwork/terraamazon-cleanroom-rust/PLAN-terraamazon-parity.md` e a seção final deste arquivo. **A Fase 0 desse novo plano está EM IMPLEMENTAÇÃO; as Fases 1–6 estão pendentes.** As seções históricas abaixo (v0.1–v0.2.2) permanecem válidas e **não** foram alteradas.
+- **Re-planejamento (2026-10-18):** aprovado o plano de **paridade do fluxo de monitoramento** (fases `0`–`6`) → ver `.pantheon/deepwork/terraamazon-cleanroom-rust/PLAN-terraamazon-parity.md` e a seção final deste arquivo. **A Fase 0 desse novo plano está concluída; a Fase 1 está implementada e revisada (aguardando commit); as Fases 2–6 estão pendentes.** As seções históricas abaixo (v0.1–v0.2.2) permanecem válidas e **não** foram alteradas.
 
 ## Decisões (Gate 1, 2026-10-16)
 
@@ -1000,8 +1000,10 @@ domain-first**; não substitui nem reescreve o histórico v0.1–v0.2.2 acima.
   **paralelizável após a Fase 1**.
 - **Arquitetura:** crate **novo e puro `ta-engine`** (só `ta-core` + `geo-types`;
   sem IO/DB/GUI).
-- **Migrações planejadas:** `0005_phases`, `0006_aoi_cells`, `0007_classes`,
-  `0008_rules`, `0009_queue`, `0010_scenes`.
+- **Migrações:** `0005_phases`, `0006_aoi_cells`,
+  `0007_grid_srid` (retificação da Decisão 4 em 2026-10-18),
+  `0008_cell_validity` (gate de validade em `cells`), `0009_classes`,
+  `0010_rules`, `0011_queue`, `0012_scenes`.
 - **Metas:** cobertura **70% global / 85%** em `ta-engine` e repos de `ta-db`;
   **zero `unwrap`/`expect`** em libs não-teste.
 
@@ -1018,8 +1020,11 @@ domain-first**; não substitui nem reescreve o histórico v0.1–v0.2.2 acima.
    `class_groups`, `rules`, `rulesets`, `tasks`, `processes`, `cell_log`,
    `draft_layers`, `scenes`, `project_scenes`, `area_settings`, `app_meta`.
 3. **(3)** Motor de domínio no crate **novo e puro `ta-engine`**.
-4. **(4)** Geometria persistida em **EPSG:4674**; **área** e **resolução de
-   célula** em **EPSG:5880** (Policônica SIRGAS2000) ou `geography`.
+4. **(4)** Decisão 4 (retificada pelo usuário em 2026-10-18): a grade é
+   configurável em QUALQUER EPSG — resolução e origem nas unidades do SRS
+   escolhido; armazenamento canônico das células em EPSG:4674; cálculo de área
+   no SRS de `area_settings.srs_id` (default EPSG:5880). Não há escolha
+   excludente entre graus e metros.
 5. **(5)** Provisionamento na Fase 0 via `scripts/dev-up.sh` **autodetectando
    docker**, com **fallback conda** (`scripts/test-pg.sh`).
 
@@ -1027,18 +1032,58 @@ domain-first**; não substitui nem reescreve o histórico v0.1–v0.2.2 acima.
 
 | Fase | Escopo | Estado |
 |---|---|---|
-| 0 | Usabilidade ponta a ponta (dev-up.sh, doctor, seed-demo, baseline, CI não-gating, docs) | **EM IMPLEMENTAÇÃO** |
-| 1 | Projeto / Fase / AOI / Células bloqueadas (`0005`, `0006`) | **pendente** |
-| 2 | Classes e regras/rulesets (`0007`, `0008`) | **pendente** |
-| 3 | Fila de processos + classificação básica (`0009`) | **pendente** |
-| 4 | Scenes / exchange (`0010`) — paralelizável após a Fase 1 | **pendente** |
+| 0 | Usabilidade ponta a ponta (dev-up.sh, doctor, seed-demo, baseline, CI não-gating, docs) | **concluída** (2026-10-17/18) |
+| 1 | Projeto / Fase / AOI / Células bloqueadas (`0005`, `0006`, `0007`, `0008`) | **implementada e revisada** (Themis, 2026-10-18: aprovada com ressalvas); achados aplicados, **aguardando commit** |
+| 2 | Classes e regras/rulesets (`0009`, `0010`) | **pendente** |
+| 3 | Fila de processos + classificação básica (`0011`) | **pendente** |
+| 4 | Scenes / exchange (`0012`) — paralelizável após a Fase 1 | **pendente** |
 | 5 | Área, import/export e visualização | **pendente** |
 | 6 | Paridade comportamental e fechamento | **pendente** |
 
-**Nada além da Fase 0 foi iniciado.** Nenhum ADR criado (não solicitado).
-Nada commitado — o usuário faz commits manualmente.
+**Fase 0 concluída; Fase 1 implementada e revisada, aguardando commit.**
+Fases 2–6 não iniciadas. Nenhum ADR criado (não solicitado).
 
-### Não commitado (este registro)
+### Fechamento da revisão da Fase 1 (2026-10-18)
+
+Themis aprovou com ressalvas; os achados de fechamento foram aplicados:
+
+- `0008_cell_validity`: trigger `cells_geom_validity` (BEFORE INSERT OR UPDATE)
+  rejeita `NOT ST_IsValid(geom)` com mensagem acionável — mesma política de
+  `features`, sem reparo silencioso. Idempotente. As migrações **futuras**
+  foram renumeradas: classes `0009`, rules `0010`, queue `0011`, scenes `0012`.
+- `bulk_insert` de células roda em **transação única** (falha em qualquer lote
+  não deixa grade parcial — o seed decide idempotência por `count > 0`).
+- `bulk_insert`/`bulk_insert_on` exigem `srid` **explícito** e o validam contra
+  `cell_layers.srid` (`SridLayerMismatch`), em vez de reprojetar lixo calado.
+- `seed-demo` imprime o id de `aoi_layers` (não o de `layers`) e reporta a
+  contagem real de células após o insert.
+- `grid info` rotula o SRS da origem e o da extensão (armazenamento 4674).
+- `--srid -1` passa pelo clap nos dois formatos e cai na validação acionável
+  (idem para origens negativas, ex.: `--origin-x -52.2`); `--help` sem markdown
+  vazando (`**`).
+- Teste métrico com tolerância **1e-6 m** e comparação **célula a célula**
+  (4674→5880 vs. motor puro), além do envelope.
+- **Números reais do fechamento:** **240 testes** (237 na revisão + 3 novos:
+  gate `cells` inválida, atomicidade do `bulk_insert`, SRS divergente); grade
+  4674/0.005 = **118 células**; grade 5880/500 m = **144 células**.
+- `area_settings.srs_id` (nome real) corrigido em PLAN/STATUS; nota de backfill
+  da `0007` (srid→4674, intencional) e do privilégio de FK
+  (`GRANT REFERENCES ON spatial_ref_sys`) registradas.
+- **Borda do recorte:** o motor usa `[x_min, x_max) × [y_min, y_max)`;
+  `ST_Contains`/`ST_Covers` **não** são equivalentes na fronteira.
+- **Adiado para o hardening da Fase 6:** dedup dos helpers de teste (n7), n8 e
+  n13 — registrados, não corrigidos agora (YAGNI/escopo).
+
+**Nada commitado** — o usuário faz commits manualmente. Arquivos em jogo neste
+fechamento (todos na árvore de trabalho): `crates/ta-db/migrations/0008_cell_validity.sql`
+(novo), `crates/ta-db/src/{repo_cell,error}.rs`, `crates/ta-core/src/cell.rs`,
+`crates/ta-cli/src/{flow,seed,main}.rs`, testes de `ta-db`/`ta-cli`,
+`crates/ta-gui/src/{db_worker,app}.rs`, `README.md`, `INSTALL.md`, PLAN/STATUS.
+
+### Não commitado (registro do re-planejamento)
+
+> Seção histórica, referente à criação do PLAN (re-planejamento domain-first),
+> **não** ao fechamento da Fase 1 acima.
 
 Novo: `.pantheon/deepwork/terraamazon-cleanroom-rust/PLAN-terraamazon-parity.md`.
 Modificado: este `STATUS.md` (linha de ponte no cabeçalho + esta seção final).

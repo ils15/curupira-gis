@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ta-core",
+    "crates/ta-engine",
     "crates/ta-gis",
     "crates/ta-db",
     "crates/ta-gui",
@@ -57,5 +58,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 # Interno
 ta-core = { path = "crates/ta-core" }
+ta-engine = { path = "crates/ta-engine" }
 ta-db = { path = "crates/ta-db" }
 ta-gis = { path = "crates/ta-gis" }

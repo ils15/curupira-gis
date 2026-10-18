@@ -3,6 +3,8 @@
 //! - [`pool`]: pool de conexões PostgreSQL/PostGIS (sqlx, tokio).
 //! - [`repo`]: traits de repositório async — um só contrato para PostGIS
 //!   (padrão) e GPKG offline (feature `offline-gpkg`, opt-in).
+//! - [`repo_phase`], [`repo_aoi`], [`repo_cell`]: repositórios do fluxo de
+//!   monitoramento (fase, AOI/área, camadas de células/células/bloqueios).
 //! - [`spatial`]: utilitários espaciais do banco (DDL, COPY BINARY, MVT).
 //! - [`ops`]: processamento espacial server-side (buffer/interseção/união —
 //!   camadas derivadas, v0.2 GUI).
@@ -14,6 +16,9 @@ pub mod error;
 pub mod ops;
 pub mod pool;
 pub mod repo;
+pub mod repo_aoi;
+pub mod repo_cell;
+pub mod repo_phase;
 pub mod spatial;
 
 pub use error::{Error, Result};

@@ -9,6 +9,7 @@
 //! Todas as queries são **bind-only** (parâmetros `$n`, zero interpolação
 //! de dado no SQL) — gate themis.
 
+use geo_types::Geometry;
 use sqlx::PgPool;
 
 use crate::{Error, Result};
@@ -16,6 +17,75 @@ use ta_core::project::DEFAULT_SRID;
 
 /// SRID-alvo gravado no CHECK do schema.
 pub const TARGET_SRID: u32 = DEFAULT_SRID;
+
+/// Unidades (best-effort) do SRS `srid`, lidas do PostGIS; erro acionável se o
+/// EPSG não existir em `spatial_ref_sys`.
+///
+/// Classificação sem dependência de PROJ no Rust: `proj4text` do EPSG começa
+/// com `+proj=longlat` nos SRS geográficos (→ "graus") e carrega `+units=m` nos
+/// projetados métricos (→ "metros"). Qualquer outro caso (pés, SRS sem
+/// proj4text) cai no rótulo neutro `unidades do EPSG <n>`.
+///
+/// Uma única query serve para validar o EPSG e para a mensagem do CLI. A FK
+/// `cell_layers.srid → spatial_ref_sys(srid)` é a garantia de integridade no
+/// banco; aqui é a mensagem acionável.
+pub async fn srid_units(pool: &PgPool, srid: i32) -> Result<String> {
+    let row: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT CASE \
+             WHEN proj4text LIKE '%+proj=longlat%' THEN 'graus' \
+             WHEN proj4text LIKE '%+units=m%'     THEN 'metros' \
+         END \
+         FROM spatial_ref_sys WHERE srid = $1::int4",
+    )
+    .bind(srid)
+    .fetch_optional(pool)
+    .await?;
+    match row {
+        None => Err(Error::UnknownSrid(srid)),
+        Some(Some(units)) => Ok(units),
+        Some(None) => Ok(format!("unidades do EPSG {srid}")),
+    }
+}
+
+/// Reprojetа uma geometria de `from_srid` para `to_srid` via PostGIS
+/// `ST_Transform` (bind-only; sem GDAL/PROJ no Rust).
+///
+/// A geometria entra como EWKB hexadecimal (ponto único de conversão,
+/// [`ta_core::geo`]) e sai como EWKB — nunca há interpolação de dado no SQL.
+pub async fn transform_geometry(
+    pool: &PgPool,
+    geom: &Geometry<f64>,
+    from_srid: u32,
+    to_srid: u32,
+) -> Result<Geometry<f64>> {
+    let from_i32 = i32::try_from(from_srid)
+        .map_err(|_| Error::Core(ta_core::Error::InvalidSrid(from_srid)))?;
+    let to_i32 =
+        i32::try_from(to_srid).map_err(|_| Error::Core(ta_core::Error::InvalidSrid(to_srid)))?;
+    let ewkb = ta_core::geo::to_ewkb(geom, from_srid)?;
+    let hex = bytes_to_hex(&ewkb);
+    let out: Vec<u8> = sqlx::query_scalar(
+        "SELECT ST_AsEWKB(ST_Transform(ST_SetSRID($1::geometry, $2::int4), $3::int4))",
+    )
+    .bind(&hex)
+    .bind(from_i32)
+    .bind(to_i32)
+    .fetch_one(pool)
+    .await?;
+    let (out_geom, _) = ta_core::geo::from_ewkb(&out)?;
+    Ok(out_geom)
+}
+
+/// Hex minúsculo (EWKB textual do PostGIS) — sem dependência externa.
+pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
 
 /// Extensão geográfica do mundo XYZ (graus, EPSG:4674 é geográfico e o
 /// schema enforce 4674 — o tile scheme usa lon/lat nesse envelope).
@@ -124,11 +194,19 @@ pub async fn mvt_tile(pool: &PgPool, layer_id: &str, tile: &MvtTile) -> Result<O
 ///
 /// Falha com erro legível quando o servidor não tem o PostGIS instalado
 /// (ex.: imagem vanilla do PostgreSQL) — a mensagem sugere o remedio.
+///
+/// Tolerante a corrida: duas sessões criando a extensão ao mesmo tempo (ex.:
+/// duas invocações da CLI, testes em paralelo) fazem uma ganhar e a outra
+/// receber `duplicate key ... pg_extension_name_index`. Se a extensão ficou
+/// disponível, o objetivo foi atingido e não é erro.
 pub async fn ensure_postgis(pool: &PgPool) -> Result<()> {
     let res = sqlx::query("CREATE EXTENSION IF NOT EXISTS postgis")
         .execute(pool)
         .await;
     if let Err(e) = res {
+        if is_postgis_ready(pool).await.unwrap_or(false) {
+            return Ok(());
+        }
         return Err(Error::Postgis(format!(
             "não foi possível criar a extensão postgis ({e}); \
              instale o PostGIS 3.4 no servidor (ex.: conda-forge postgis=3.4, \

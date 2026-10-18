@@ -10,6 +10,7 @@ authors.workspace = true
 [dependencies]
 ta-core.workspace = true
 async-trait.workspace = true
+geo-types.workspace = true
 thiserror.workspace = true
 time.workspace = true
 serde_json.workspace = true
@@ -22,6 +23,7 @@ rusqlite = { workspace = true, optional = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 geo-types.workspace = true
+ta-engine.workspace = true
 # Harness do baseline de performance (Fase 0). Sem `plotters`/`rayon`: só o
 # runner textual entra no grafo (menos deps, sem geração de HTML).
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

@@ -191,6 +191,39 @@ DSN: `--dsn` > env `TA_PG_DSN` > `postgres://ta:ta@localhost:5432/ta`.
 O primeiro comando aplica as migrações idempotentemente. No desktop a conexão
 usa o diálogo (ou `TA_DATABASE_URL` pré-preenchendo o campo URL).
 
+### Fluxo de monitoramento (CLI)
+
+Fase → AOI → grade → células bloqueadas. Os ids de camada saem de
+`ta-cli list-layers`; os de AOI/grade aparecem na saída dos próprios comandos.
+
+```sh
+# 1) fase do fluxo (agrupa AOIs e grades)
+ta-cli phase create --project demo --name "2026-10" --sort-order 1
+ta-cli phase list --project demo
+
+# 2) AOI = camada vetorial existente eleita como área de interesse
+ta-cli list-layers --project demo            # pegue o UUID de `demo_aoi`
+ta-cli aoi create --project demo --layer <UUID demo_aoi>
+
+# 3) grade em GRAUS (4674, default): resolução 0.005° → 118 células no demo
+ta-cli grid create --aoi-layer <UUID aoi_layers> --resolution 0.005 --name grade-4674
+
+# 3b) a MESMA AOI em METROS (5880, Policônica): 500 m → 144 células
+ta-cli grid create --aoi-layer <UUID aoi_layers> --resolution 500     --srid 5880 --name grade-5880
+
+# 4) contagem, bloqueadas e extensão da grade
+ta-cli grid info --cell-layer <UUID cell_layers>
+
+# 5) bloquear/listar células (id "<col>_<row>", 0-based)
+ta-cli cell block --cell-layer <UUID cell_layers> --cell-id 0_0 --reason "nuvem"
+ta-cli cell list-blocked --cell-layer <UUID cell_layers>
+```
+
+**Unidades por SRS:** `--resolution`, `--origin-x` e `--origin-y` são expressos
+no SRS de `--srid` — graus se geográfico (4674), metros se projetado (5880). As
+células são **sempre persistidas em EPSG:4674** (armazenamento canônico); por
+isso `grid info` rotula a origem no SRS da grade e a extensão em EPSG:4674.
+
 ## Releases
 
 - Workflow `release.yml` dispara no push de tag `v*` e produz: binários
@@ -239,6 +272,9 @@ let path = client.get_map(&GetMapRequest {
 
 ## Status
 
+- **Fase 1 (fluxo de monitoramento)**: fase/AOI/grade/células bloqueadas no
+  banco (`0005`–`0008`) e na CLI (`phase`/`aoi`/`grid`/`cell`) — ✅
+  (implementada e revisada em 2026-10-18; aguardando commit)
 - **Fase 0 (usabilidade + baseline)**: `scripts/dev-up.sh` (provisionamento em
   1 comando, com e sem docker), `ta-cli doctor` (exit 0/1 com remediação),
   `ta-cli seed-demo` (projeto `demo` idempotente, dados sintéticos em

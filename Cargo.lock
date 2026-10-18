@@ -4747,6 +4747,7 @@ dependencies = [
  "sqlx",
  "ta-core",
  "ta-db",
+ "ta-engine",
  "ta-gis",
  "time",
  "tokio",
@@ -4775,9 +4776,18 @@ dependencies = [
  "serde_json",
  "sqlx",
  "ta-core",
+ "ta-engine",
  "thiserror 2.0.21",
  "time",
  "tokio",
+]
+
+[[package]]
+name = "ta-engine"
+version = "0.1.0"
+dependencies = [
+ "geo-types",
+ "ta-core",
 ]
 
 [[package]]

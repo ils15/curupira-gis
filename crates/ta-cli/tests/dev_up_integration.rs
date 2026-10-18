@@ -53,9 +53,10 @@ fn run_seed() {
     );
 }
 
-/// Contagens do projeto `demo`: features por camada (ordenadas por nome),
-/// classes distintas em `demo_pontos` e células em `demo_grade`.
-async fn snapshot(pool: &PgPool) -> (Vec<i64>, i64, i64) {
+/// Contagens do projeto `demo` no schema REAL da Fase 1:
+/// `(features por camada, classes distintas, aoi_layers, cell_layers, cells,
+/// features marcadas como provisórias)`.
+async fn snapshot(pool: &PgPool) -> (Vec<i64>, i64, i64, i64, i64, i64) {
     let counts: Vec<i64> = sqlx::query_scalar(
         "SELECT count(f.id)::int8 FROM layers l \
          LEFT JOIN features f ON f.layer_id = l.id \
@@ -76,17 +77,52 @@ async fn snapshot(pool: &PgPool) -> (Vec<i64>, i64, i64) {
     .await
     .expect("classes distintas");
 
-    let cells: i64 = sqlx::query_scalar(
-        "SELECT count(f.id)::int8 FROM features f \
-         JOIN layers l ON l.id = f.layer_id \
-         JOIN projects p ON p.id = l.project_id \
-         WHERE p.name = 'demo' AND l.name = 'demo_grade'",
+    let aoi_layers: i64 = sqlx::query_scalar(
+        "SELECT count(*)::int8 FROM aoi_layers a \
+         JOIN projects p ON p.id = a.project_id WHERE p.name = 'demo'",
     )
     .fetch_one(pool)
     .await
-    .expect("células da grade");
+    .expect("aoi_layers do demo");
 
-    (counts, classes, cells)
+    let cell_layers: i64 = sqlx::query_scalar(
+        "SELECT count(*)::int8 FROM cell_layers cl \
+         JOIN projects p ON p.id = cl.project_id WHERE p.name = 'demo'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("cell_layers do demo");
+
+    let cells: i64 = sqlx::query_scalar(
+        "SELECT count(*)::int8 FROM cells c \
+         JOIN cell_layers cl ON cl.id = c.cell_layer_id \
+         JOIN projects p ON p.id = cl.project_id WHERE p.name = 'demo'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("células da grade real");
+
+    // Regressão: o marcador provisório da Fase 0 não pode voltar.
+    let provisional: i64 = sqlx::query_scalar(
+        "SELECT count(*)::int8 FROM features f \
+         JOIN layers l ON l.id = f.layer_id \
+         JOIN projects p ON p.id = l.project_id \
+         WHERE p.name = 'demo' AND f.attrs ? 'provisorio'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("features provisórias");
+
+    (counts, classes, aoi_layers, cell_layers, cells, provisional)
+}
+
+/// Remove o projeto `demo` para partir de um estado limpo (o seed resolve por
+/// nome; remover garante que o teste mede exatamente o que o seed cria).
+async fn reset_demo(pool: &PgPool) {
+    sqlx::query("DELETE FROM projects WHERE name = 'demo'")
+        .execute(pool)
+        .await
+        .expect("limpar o projeto demo");
 }
 
 /// `doctor` reprova (exit != 0) quando o schema não foi aplicado e aprova
@@ -111,8 +147,8 @@ async fn doctor_aprova_depois_do_migrate() {
     assert!(stdout.contains("migrações"), "saída:\n{stdout}");
 }
 
-/// `seed-demo` cria as três camadas com 3 classes e 4 células, e rodar de
-/// novo NÃO duplica nada (idempotência).
+/// `seed-demo` cria as camadas vetoriais (AOI + pontos), o vínculo de AOI e a
+/// grade REAL (`cell_layers` + `cells`); rodar de novo NÃO duplica nada.
 #[tokio::test]
 async fn seed_demo_cria_o_demo_e_e_idempotente() {
     if !pg_enabled() {
@@ -123,16 +159,28 @@ async fn seed_demo_cria_o_demo_e_e_idempotente() {
     let pool = PgPool::connect(&dsn())
         .await
         .expect("conectar no PG do harness");
+    reset_demo(&pool).await;
 
     run_seed();
-    let (before, classes, cells) = snapshot(&pool).await;
-    assert_eq!(before.len(), 3, "esperava 3 camadas do demo: {before:?}");
-    assert_eq!(classes, 3, "esperava 3 classes de exemplo");
-    assert_eq!(cells, 4, "esperava a grade provisória 2×2");
+    let first = snapshot(&pool).await;
+    assert_eq!(
+        first.0.len(),
+        2,
+        "esperava 2 camadas vetoriais do demo (AOI + pontos): {:?}",
+        first.0
+    );
+    assert_eq!(first.1, 3, "esperava 3 classes de exemplo");
+    assert_eq!(first.2, 1, "esperava 1 vínculo de AOI");
+    assert_eq!(first.3, 1, "esperava 1 camada de células");
+    assert_eq!(
+        first.4, 118,
+        "a grade real do fixture (res 0.005°) tem 118 células"
+    );
+    assert_eq!(first.5, 0, "nenhuma feature pode ter attrs.provisorio");
 
     run_seed();
-    let (after, _, _) = snapshot(&pool).await;
-    assert_eq!(before, after, "seed-demo não é idempotente");
+    let second = snapshot(&pool).await;
+    assert_eq!(first, second, "seed-demo não é idempotente");
 
     pool.close().await;
 }
