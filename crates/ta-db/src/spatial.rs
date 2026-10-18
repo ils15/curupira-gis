@@ -159,6 +159,37 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+/// Versões das migrações disponíveis em `migrations/` (crescente).
+///
+/// Lê o MESMO diretório que [`run_migrations`] aplica — é o lado "esperado"
+/// da comparação feita pelo `ta-cli doctor` (`_sqlx_migrations` é o lado
+/// aplicado).
+pub async fn local_migration_versions() -> Result<Vec<i64>> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let migrator = sqlx::migrate::Migrator::new(dir).await?;
+    Ok(migrator.iter().map(|m| m.version).collect())
+}
+
+/// Versões já aplicadas no banco (`_sqlx_migrations`), crescente.
+///
+/// `Ok(vec![])` = migrações nunca rodaram neste banco (tabela ausente), o que
+/// o `ta-cli doctor` traduz em "rode `ta-cli migrate`" em vez de erro cru.
+pub async fn applied_migration_versions(pool: &PgPool) -> Result<Vec<i64>> {
+    let exists: bool = sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
+        .fetch_one(pool)
+        .await?;
+    if !exists {
+        return Ok(Vec::new());
+    }
+    let versions: Vec<i64> = sqlx::query_scalar(
+        "SELECT COALESCE(array_agg(version ORDER BY version), ARRAY[]::bigint[]) \
+         FROM _sqlx_migrations",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(versions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +197,19 @@ mod tests {
     #[test]
     fn srid_alvo_e_4674() {
         assert_eq!(TARGET_SRID, 4674);
+    }
+
+    /// As migrações versionadas do crate são 0001..=0004; o doctor depende de
+    /// `local_migration_versions` enxergar exatamente esse conjunto (leitura de
+    /// diretório, sem banco).
+    #[tokio::test]
+    async fn migracoes_locais_sao_lidas_do_diretorio() {
+        let versions = local_migration_versions().await.expect("ler migrations/");
+        assert_eq!(
+            versions,
+            vec![1, 2, 3, 4],
+            "revise se novas migrações entraram"
+        );
     }
 
     #[test]

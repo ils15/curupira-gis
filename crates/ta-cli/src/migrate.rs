@@ -1,5 +1,10 @@
 //! `ta-cli migrate` — migração de dados para o destino PG16/PostGIS 3.4.
 //!
+//! Dois modos:
+//! - **schema-only** (`--from-dir` omitido): aplica extensão PostGIS +
+//!   migrações sqlx no destino e reporta o que estava pendente. Idempotente.
+//! - **dados** (`--from-dir <dir>`): além do schema, migra arquivos de origem.
+//!
 //! Fontes suportadas em `--from-dir`:
 //! - **`.shp`** (com sidecars .shx/.dbf/.prj) → `ogr2ogr` com reprojeção
 //!   `-t_srs EPSG:4674`, coluna `geom` e tabela `ta_import_<nome>`;
@@ -17,16 +22,17 @@ use std::process::Command;
 
 use sqlx::PgPool;
 use ta_db::pool::{self, DbConfig};
-use ta_db::spatial::{ensure_postgis, is_postgis_ready};
+use ta_db::spatial::{ensure_postgis, is_postgis_ready, run_migrations};
 
 use crate::dsn::mask_password;
 
 /// Argumentos do subcomando `migrate` (clap derive em `main.rs`).
 #[derive(Debug, Clone)]
 pub struct MigrateArgs {
-    /// Diretório com os arquivos de origem (.shp/.tif/.sql).
-    pub from_dir: PathBuf,
-    /// DSN do destino (`postgres://...`).
+    /// Diretório com os arquivos de origem (.shp/.tif/.sql). `None` = só
+    /// aplica o schema (extensão PostGIS + migrações sqlx).
+    pub from_dir: Option<PathBuf>,
+    /// DSN do destino (`postgres://...`) já resolvido (flag/env/default).
     pub to: String,
     /// Só lista o plano, não executa nada.
     pub dry_run: bool,
@@ -45,17 +51,25 @@ enum PlanItem {
 
 /// Porta de entrada do subcomando. Erros chegam como texto legível.
 pub async fn run(args: MigrateArgs) -> Result<(), String> {
-    let items = collect_plan(&args.from_dir)?;
+    let Some(from_dir) = args.from_dir.as_deref() else {
+        // Modo schema-only: sem origem de dados, o `migrate` é o passo
+        // explícito que aplica extensão + migrações (o resto do CLI já faz o
+        // mesmo de forma implícita em `open_pool`, mas aqui o usuário vê o
+        // resultado e pode exigir o passo).
+        return apply_schema(&args.to, args.dry_run).await;
+    };
+
+    let items = collect_plan(from_dir)?;
     if items.is_empty() {
         return Err(format!(
             "nenhum arquivo .shp/.tif/.sql encontrado em {}",
-            args.from_dir.display()
+            from_dir.display()
         ));
     }
 
     println!(
         "migrate: origem {} → destino {}",
-        args.from_dir.display(),
+        from_dir.display(),
         mask_password(&args.to)
     );
     for (i, item) in items.iter().enumerate() {
@@ -198,6 +212,70 @@ fn sanitize_table_name(stem: &str) -> String {
         }
     }
     out
+}
+
+/// Aplica extensão PostGIS + migrações sqlx no destino (modo schema-only).
+///
+/// Idempotente: re-executar não refaz migração já aplicada. O relatório diz o
+/// que estava pendente antes e o total aplicado depois — é o par que o
+/// `ta-cli doctor` confere.
+async fn apply_schema(to: &str, dry_run: bool) -> Result<(), String> {
+    println!("migrate: schema-only → destino {}", mask_password(to));
+    let cfg = DbConfig {
+        url: to.to_owned(),
+        max_connections: 4,
+    };
+    let pool = pool::connect(&cfg)
+        .await
+        .map_err(|e| format!("conexão ao destino falhou: {e}"))?;
+    check_pg_version(&pool).await?;
+
+    let local = ta_db::spatial::local_migration_versions()
+        .await
+        .map_err(|e| format!("lendo migrações locais: {e}"))?;
+    let before = ta_db::spatial::applied_migration_versions(&pool)
+        .await
+        .map_err(|e| format!("lendo _sqlx_migrations: {e}"))?;
+    let pending: Vec<String> = local
+        .iter()
+        .filter(|v| !before.contains(v))
+        .map(|v| format!("{v:04}"))
+        .collect();
+
+    if dry_run {
+        println!(
+            "dry-run: {} migração(ões) pendente(s) [{}]",
+            pending.len(),
+            if pending.is_empty() {
+                "nenhuma".to_owned()
+            } else {
+                pending.join(", ")
+            }
+        );
+        pool.close().await;
+        return Ok(());
+    }
+
+    ensure_postgis(&pool).await.map_err(|e| e.to_string())?;
+    run_migrations(&pool)
+        .await
+        .map_err(|e| format!("migrações: {e}"))?;
+
+    let after = ta_db::spatial::applied_migration_versions(&pool)
+        .await
+        .map_err(|e| format!("lendo _sqlx_migrations: {e}"))?;
+    println!(
+        "  schema ok: {}/{} migrações aplicadas{}",
+        after.len().min(local.len()),
+        local.len(),
+        if pending.is_empty() {
+            " (nada pendente)".to_owned()
+        } else {
+            format!(" (aplicadas agora: {})", pending.join(", "))
+        }
+    );
+    pool.close().await;
+    Ok(())
 }
 
 /// Verdadeiro identificador seguro (defesa em profundidade antes de interpolar

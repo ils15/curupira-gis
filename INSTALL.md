@@ -159,6 +159,31 @@ a extensão se o usuário tiver permissão).
 
 ## Primeiro run (todos os OS)
 
+### Do fonte, em UM comando (recomendado)
+
+```sh
+bash scripts/dev-up.sh        # banco + schema + validação + projeto `demo`
+bash scripts/dev-up.sh --gui  # o mesmo e abre o app (precisa de display)
+```
+
+O script provisiona o banco sozinho (docker quando existe; cluster PG16 +
+PostGIS 3.4 efêmero via conda quando não), roda `ta-cli migrate`, **exige
+`ta-cli doctor` com exit 0** e cria o projeto de demonstração `demo` (AOI +
+pontos em 3 classes + grade provisória) a partir de `testdata/monitoring/`.
+É idempotente — rodar de novo não duplica banco nem dados, e serve também como
+verificação do ambiente:
+
+```sh
+ta-cli doctor     # exit 0 = pronto; exit != 0 = o relatório diz o que fazer
+ta-cli migrate    # aplica o schema (idempotente)
+ta-cli seed-demo  # recria/verifica o projeto `demo`
+```
+
+Na GUI, a URL do banco já vem preenchida via `TA_DATABASE_URL`: clique
+**Conectar** e **Ctrl+O** para abrir o projeto `demo`.
+
+### Passo a passo manual
+
 1. **Conectar** — abra o Curupira GIS; no diálogo de conexão use a URL do
    passo anterior (ou confie em `TA_DATABASE_URL`). O app aplica as migrações
    no primeiro uso.
@@ -185,6 +210,8 @@ a extensão se o usuário tiver permissão).
 
 | Sintoma | Causa provável | Correção |
 |---|---|---|
+| `ta-cli doctor` sai ≠ 0 | banco fora, PostGIS ausente, migração pendente, GDAL ou permissão de escrita | a própria linha `→` do relatório diz o que fazer; depois `ta-cli migrate` e repita |
+| `ta-cli doctor` acusa "faltam N migração(ões)" | schema não aplicado neste banco | `ta-cli migrate --to <dsn>` (idempotente) |
 | `gdal.dll` / `libgdal.so.X` não encontrado | GDAL ausente (Linux/build do fonte) | `apt install libgdal-dev` / instale GDAL 3.8+ |
 | App abre, raster não projeta | `share\proj` removido do zip ou `PROJ_LIB` sobrescrito | reinstale o zip; não defina `PROJ_LIB` manualmente |
 | `no pg_hba.conf entry` / auth falha | senha/host errados no DSN | revise `TA_DATABASE_URL`; no Windows a senha é a do instalador EDB |

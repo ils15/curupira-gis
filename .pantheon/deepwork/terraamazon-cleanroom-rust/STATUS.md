@@ -5,6 +5,7 @@
 - **Gate 1:** **APROVADO** pelo usuário (2026-10-16)
 - **Modelo IA:** GLM-5.3-Flash (z.ai) para todos os agentes
 - **Repositório:** `/home/jovyan/testes/terraamazon-cleanroom-rust` → publicado em https://github.com/ils15/curupira-gis (commit `3b3eaa8`, tag `v0.1.0-alpha`, 2026-10-16)
+- **Re-planejamento (2026-10-18):** aprovado o plano de **paridade do fluxo de monitoramento** (fases `0`–`6`) → ver `.pantheon/deepwork/terraamazon-cleanroom-rust/PLAN-terraamazon-parity.md` e a seção final deste arquivo. **A Fase 0 desse novo plano está EM IMPLEMENTAÇÃO; as Fases 1–6 estão pendentes.** As seções históricas abaixo (v0.1–v0.2.2) permanecem válidas e **não** foram alteradas.
 
 ## Decisões (Gate 1, 2026-10-16)
 
@@ -975,3 +976,70 @@ Run [39048582185](https://api.github.com/repos/ils15/curupira-gis/actions/runs/3
 ### Não commitado
 
 Nada commitado (instrução). Modificado: `deny.toml`, este STATUS.md. Arquivos para @iris: `deny.toml` (commit no push de fix).
+
+---
+
+## Re-planejamento — PLANO DE PARIDADE DO FLUXO DE MONITORAMENTO (@mnemosyne, registro em 2026-10-18)
+
+Plano **aprovado pelo usuário** registrado como artefato em
+`PLAN-terraamazon-parity.md` (mesma pasta). Este é um **re-planejamento
+domain-first**; não substitui nem reescreve o histórico v0.1–v0.2.2 acima.
+
+### Resumo do que foi aprovado
+
+- **Objetivo:** Curupira GIS → réplica funcional **clean-room** do **fluxo de
+  monitoramento** do TerraAmazon 7.3.2 (paridade **comportamental**, não de código).
+- **Diagnóstico raiz (medido):** GUI-first — `ta-gui` **12.270** linhas `.rs`
+  (src+tests) sobre domínio raso (`ta-core` **419** linhas; **3 tabelas**:
+  `projects`/`layers`/`features`) ⇒ a paridade exige abordagem **domain-first**.
+- **Escopo IN:** projeto/fase/AOI/células bloqueadas/classes/regras-rulesets/fila
+  de processos/classificação básica/área/import-export/visualização.
+  **OUT:** raster pesado, DTM, gráficos, layout de impressão, servidor WMS/WCS,
+  geocoding, plugin manager real, multi-usuário, bookmarks, image servers.
+- **DAG:** `0 → 1 → 2 → 3 → 5 → 6`, com a **Fase 4** (scenes/exchange)
+  **paralelizável após a Fase 1**.
+- **Arquitetura:** crate **novo e puro `ta-engine`** (só `ta-core` + `geo-types`;
+  sem IO/DB/GUI).
+- **Migrações planejadas:** `0005_phases`, `0006_aoi_cells`, `0007_classes`,
+  `0008_rules`, `0009_queue`, `0010_scenes`.
+- **Metas:** cobertura **70% global / 85%** em `ta-engine` e repos de `ta-db`;
+  **zero `unwrap`/`expect`** em libs não-teste.
+
+### Decisões registradas (não relitigar)
+
+1. **(1 = a)** Paridade validada **apenas** por **documentação pública +
+   observação comportamental**. **Proibida** engenharia reversa do produto
+   legado. **Todo** o material extraído (app desempacotado 244 MB, schema SQL,
+   help `.qch`, artefatos de análise Ghidra) foi **DELETADO do disco em
+   2026-10-18** por decisão do usuário; nenhum insumo derivado do binário legado
+   entra no repositório (`CONTRIBUTING.md`, linhas 16–29).
+2. **(2 = sim)** Nomes de tabela **próprios**, sem prefixo legado: `phases`,
+   `aoi_layers`, `cell_layers`, `cells`, `blocked_cells`, `classes`,
+   `class_groups`, `rules`, `rulesets`, `tasks`, `processes`, `cell_log`,
+   `draft_layers`, `scenes`, `project_scenes`, `area_settings`, `app_meta`.
+3. **(3)** Motor de domínio no crate **novo e puro `ta-engine`**.
+4. **(4)** Geometria persistida em **EPSG:4674**; **área** e **resolução de
+   célula** em **EPSG:5880** (Policônica SIRGAS2000) ou `geography`.
+5. **(5)** Provisionamento na Fase 0 via `scripts/dev-up.sh` **autodetectando
+   docker**, com **fallback conda** (`scripts/test-pg.sh`).
+
+### Estado real (sem inflar progresso)
+
+| Fase | Escopo | Estado |
+|---|---|---|
+| 0 | Usabilidade ponta a ponta (dev-up.sh, doctor, seed-demo, baseline, CI não-gating, docs) | **EM IMPLEMENTAÇÃO** |
+| 1 | Projeto / Fase / AOI / Células bloqueadas (`0005`, `0006`) | **pendente** |
+| 2 | Classes e regras/rulesets (`0007`, `0008`) | **pendente** |
+| 3 | Fila de processos + classificação básica (`0009`) | **pendente** |
+| 4 | Scenes / exchange (`0010`) — paralelizável após a Fase 1 | **pendente** |
+| 5 | Área, import/export e visualização | **pendente** |
+| 6 | Paridade comportamental e fechamento | **pendente** |
+
+**Nada além da Fase 0 foi iniciado.** Nenhum ADR criado (não solicitado).
+Nada commitado — o usuário faz commits manualmente.
+
+### Não commitado (este registro)
+
+Novo: `.pantheon/deepwork/terraamazon-cleanroom-rust/PLAN-terraamazon-parity.md`.
+Modificado: este `STATUS.md` (linha de ponte no cabeçalho + esta seção final).
+Nenhum arquivo de código tocado.

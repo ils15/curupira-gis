@@ -21,6 +21,10 @@ ta-gis.workspace = true
 sqlx.workspace = true
 time.workspace = true
 tokio.workspace = true
+# Geometria + JSON dos dados sintéticos do `seed-demo` (células da grade e
+# atributos de classe) — não são reexportados por ta-core.
+geo-types.workspace = true
+serde_json.workspace = true
 
 [features]
 # Defaults do CLI: IO completo + banco. WMS fica opt-in (`--features wms`).

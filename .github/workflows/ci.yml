@@ -84,6 +84,15 @@ jobs:
       - name: Testes gated contra o service
         run: cargo test --workspace
 
+      # Fase 0 — baseline de performance do ta-db. NÃO-GATING de propósito:
+      # números informativos (publicados em benches/BASELINE.md), medidos em
+      # runner compartilhado; um pico de ruído não pode derrubar o CI. Fica no
+      # job com service PostGIS porque bulk_insert/bbox_query/MVT exigem banco
+      # (o MVT só mede de fato em imagem com protobuf-c, como esta).
+      - name: baseline ta-db (não-gating, informativo)
+        continue-on-error: true
+        run: cargo bench -p ta-db --bench ta_db_baseline
+
   windows:
     # AVISO HONESTO: este job não pôde ser executado no host de desenvolvimento
     # (Linux). A primeira run de CI no push é a prova real. O caminho GDAL é

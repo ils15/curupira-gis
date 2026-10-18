@@ -9,7 +9,10 @@
 //!   ao lado do arquivo).
 //! - **export** — camada do banco → SHP/GeoJSON/GPKG/FGB/CSV.
 //! - **list-layers** — camadas do projeto.
-//! - **migrate** — migração do legado (Fase 1; ver `migrate.rs`).
+//! - **migrate** — aplica o schema (idempotente) e, com `--from-dir`, migra
+//!   dados do legado (Fase 1; ver `migrate.rs`).
+//! - **doctor** — diagnóstico do ambiente (banco/PostGIS/migrações/GDAL).
+//! - **seed-demo** — projeto `demo` com dados sintéticos (ver `seed.rs`).
 //!
 //! DSN: `--dsn` > env `TA_PG_DSN` > `postgres://ta:ta@localhost:5432/ta`.
 
@@ -20,9 +23,11 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 use ta_db::pool::{self, DbConfig};
 
+mod doctor;
 mod dsn;
 mod import;
 mod migrate;
+mod seed;
 
 /// Resolve o DSN: flag → env → default do compose.
 fn resolve_dsn(dsn: Option<&str>) -> String {
@@ -142,16 +147,44 @@ enum Cmd {
         dsn: Option<String>,
     },
     /// Migra dados do banco legado/diretório de fontes para PG16/PostGIS (SRID 4674).
+    ///
+    /// Sem `--from-dir`, apenas aplica extensão + migrações do schema
+    /// (idempotente) no destino.
     Migrate {
-        /// Diretório com os arquivos de origem (.shp/.tif/.sql).
+        /// Diretório com os arquivos de origem (.shp/.tif/.sql). Omitido →
+        /// modo schema-only.
         #[arg(long)]
-        from_dir: PathBuf,
-        /// DSN do destino, ex.: postgres://ta:ta@host:5432/ta
+        from_dir: Option<PathBuf>,
+        /// DSN do destino, ex.: postgres://ta:ta@host:5432/ta (senão env
+        /// TA_PG_DSN / default do compose).
         #[arg(long)]
-        to: String,
+        to: Option<String>,
         /// Só lista o que seria feito; não executa nada.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Diagnostica o ambiente (PostgreSQL, PostGIS, migrações, GDAL, escrita).
+    ///
+    /// Exit 0 = tudo OK; exit 1 = alguma checagem falhou, com o que fazer.
+    Doctor {
+        /// DSN do banco (senão env TA_PG_DSN / default compose).
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Cria o projeto `demo` com dados sintéticos (AOI + pontos + grade provisória).
+    SeedDemo {
+        /// Projeto alvo (criado se não existir).
+        #[arg(long, default_value = seed::DEMO_PROJECT)]
+        project: String,
+        /// Polígono da AOI (GeoJSON EPSG:4674).
+        #[arg(long, default_value = "testdata/monitoring/aoi.geojson")]
+        aoi: PathBuf,
+        /// Pontos com atributo de classe (CSV-XY).
+        #[arg(long, default_value = "testdata/monitoring/points_classes.csv")]
+        points: PathBuf,
+        /// DSN do banco (senão env TA_PG_DSN / default compose).
+        #[arg(long)]
+        dsn: Option<String>,
     },
 }
 
@@ -229,16 +262,35 @@ async fn main() -> ExitCode {
             from_dir,
             to,
             dry_run,
-        } => match migrate::run(migrate::MigrateArgs {
-            from_dir,
-            to,
-            dry_run,
-        })
-        .await
-        {
-            Ok(()) => Ok(()),
-            Err(e) => Err(e),
-        },
+        } => {
+            migrate::run(migrate::MigrateArgs {
+                from_dir,
+                to: resolve_dsn(to.as_deref()),
+                dry_run,
+            })
+            .await
+        }
+        // `doctor` imprime o próprio relatório e devolve o exit code — não
+        // passa pelo formatador de erro ("erro (... ms): ...") abaixo.
+        Cmd::Doctor { dsn } => {
+            let report = doctor::diagnose(dsn.as_deref()).await;
+            print!("{}", report.render());
+            return ExitCode::from(report.exit_code());
+        }
+        Cmd::SeedDemo {
+            project,
+            aoi,
+            points,
+            dsn,
+        } => {
+            seed::run(seed::SeedArgs {
+                project,
+                aoi,
+                points,
+                dsn,
+            })
+            .await
+        }
     };
 
     match result {

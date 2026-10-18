@@ -1,0 +1,33 @@
+{
+  "type": "FeatureCollection",
+  "name": "aoi_demo",
+  "crs": {
+    "type": "name",
+    "properties": {
+      "name": "urn:ogc:def:crs:EPSG::4674"
+    }
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "nome": "AOI demo (Altamira/PA)",
+        "fonte": "sintetico"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-52.205, -3.215],
+            [-52.160, -3.220],
+            [-52.142, -3.192],
+            [-52.150, -3.165],
+            [-52.178, -3.158],
+            [-52.202, -3.178],
+            [-52.205, -3.215]
+          ]
+        ]
+      }
+    }
+  ]
+}

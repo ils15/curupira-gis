@@ -27,23 +27,39 @@ Binários de release (Windows zip com GDAL embutida; Linux tar.gz) em
 como **draft** até revisão humana. Instruções completas por OS:
 **[INSTALL.md](INSTALL.md)**.
 
-## Quickstart (5 min)
+## Quickstart (1 comando)
 
 ```sh
-# 1. Banco (PostgreSQL 16 + PostGIS 3.4)
-docker compose up -d postgis          # postgres://ta:ta@localhost:5432/ta
-
-# 2. Importar dados de exemplo (fixture do próprio repo)
-cargo run -p ta-cli -- import-vector --input testdata/fixtures_vector.geojson \
-    --project minha-area
-
-# 3. Abrir o desktop e conectar (diálogo ou TA_DATABASE_URL)
-cargo run -p ta-gui
+bash scripts/dev-up.sh          # banco + schema + projeto de demonstração
+bash scripts/dev-up.sh --gui    # o mesmo e abre o desktop (precisa de display)
 ```
 
-Pré-requisitos do quickstart: [Rust](https://rustup.rs) e GDAL
+O `dev-up.sh` escolhe o banco sozinho — `docker compose up -d postgis` quando
+há docker, cluster efêmero via conda (`scripts/test-pg.sh`) quando não há — e
+depois roda `ta-cli doctor` → `ta-cli migrate` → `ta-cli seed-demo`,
+**validando de verdade** (doctor precisa sair 0) antes de terminar. É
+idempotente: rodar duas vezes não sobe banco duplicado nem duplica dados.
+
+Na GUI: **Conectar** (a URL já vem preenchida via `TA_DATABASE_URL`) e
+**Ctrl+O** para abrir o projeto `demo` — AOI, 20 pontos em 3 classes e a grade
+provisória, prontos para visualizar.
+
+Pré-requisitos: [Rust](https://rustup.rs) e GDAL
 (`sudo apt install libgdal-dev` / `vcpkg install gdal:x64-windows` no Windows —
-o binário de release já traz GDAL embutida). Detalhes: [INSTALL.md](INSTALL.md).
+o binário de release já traz GDAL embutida). Docker é **opcional**. Detalhes:
+[INSTALL.md](INSTALL.md).
+
+### Quickstart manual (sem o script)
+
+```sh
+docker compose up -d postgis                          # ou scripts/test-pg.sh --no-tests
+cargo run -p ta-cli -- migrate                        # schema (idempotente)
+cargo run -p ta-cli -- doctor                         # exit 0 = ambiente ok
+cargo run -p ta-cli -- seed-demo                      # projeto `demo`
+cargo run -p ta-gui                                   # conecte e abra `demo`
+```
+
+DSN na ordem: `--dsn` > env `TA_PG_DSN` > `postgres://ta:ta@localhost:5432/ta`.
 
 ## Stack
 
@@ -71,7 +87,7 @@ crates/
 ├── ta-gis    # IO: reader/writer, normalização p/ 4674, derivados (COG/MVT/FlatGeobuf)
 ├── ta-db     # persistência: pool sqlx, repos async, espaciais; offline-gpkg (opt-in)
 ├── ta-gui    # desktop eframe + trait MapView (binário: curupira-gis)
-└── ta-cli    # import-vector, import-raster, export, list-layers, migrate
+└── ta-cli    # doctor, migrate, seed-demo, import-vector, import-raster, export, list-layers
 ```
 
 ## Licenças e clean-room
@@ -85,14 +101,26 @@ crates/
 ## Banco de desenvolvimento (PostGIS 3.4 / PG16)
 
 ```sh
+bash scripts/dev-up.sh        # forma recomendada: sobe o banco, migra, valida e semeia o demo
+```
+
+Manual, com docker:
+
+```sh
 cp .env.example .env          # opcional: TA_PG_USER / TA_PG_PASSWORD
 docker compose up -d postgis
 # conexão: postgres://ta:ta@localhost:5432/ta
 ```
 
+Sem docker (host como o de referência, com sudo bloqueado), o
+`scripts/test-pg.sh` provisiona um PG16 + PostGIS 3.4 efêmero via conda-forge
+na porta 55432 (`--no-tests` sobe e deixa no ar, imprimindo o DSN e o comando
+de parada).
+
 O `docker-compose.yml` sobe `postgis/postgis:16-3.4` na porta 5432 com banco
 `ta`. Migrações sqlx e o schema com `geometry(Geometry,4674)` + GIST + CHECK
-de SRID são aplicadas idempotentemente pelo primeiro comando da CLI/GUI.
+de SRID são aplicadas idempotentemente pelo primeiro comando da CLI/GUI — ou
+explicitamente por `ta-cli migrate`.
 
 ## Build & verificação
 
@@ -102,6 +130,19 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo deny check        # opcional (licenças/advisories/bans) — ver deny.toml
+```
+
+Testes de integração (PostGIS) ficam **gated** por `TA_TEST_PG=1` e não
+quebram `cargo test --workspace` sem banco: use
+`scripts/test-pg.sh` (sobe o cluster, roda a suíte gated e derruba).
+
+Baseline de performance do `ta-db` (`bulk_insert` 10k, `bbox_query`,
+`list_with_ids`, `mvt_tile`) — números publicados em
+[`benches/BASELINE.md`](benches/BASELINE.md):
+
+```sh
+TA_TEST_PG=1 TA_PG_DSN=postgres://ta:ta@127.0.0.1:55432/ta \
+    cargo bench -p ta-db --bench ta_db_baseline
 ```
 
 Features opcionais:
@@ -118,6 +159,17 @@ cargo build -p ta-db --features offline-gpkg
 ## CLI
 
 ```sh
+# ambiente: diagnóstico legível (Postgres/PostGIS/migrações/GDAL/escrita).
+# exit 0 = tudo ok; exit != 0 = o relatório diz o que fazer
+cargo run -p ta-cli -- doctor
+
+# schema idempotente (extensão PostGIS + migrações) e relatório do que faltava
+cargo run -p ta-cli -- migrate --to postgres://ta:ta@localhost:5432/ta
+
+# projeto `demo` com dados SINTÉTICOS: AOI (testdata/monitoring/aoi.geojson),
+# 20 pontos em 3 classes e a grade provisória. Idempotente.
+cargo run -p ta-cli -- seed-demo
+
 # import vetorial: detecta formato (SHP/GeoJSON/GPKG/FGB/CSV-XY), reprojeta
 # para 4674, valida geometria, cria camada e faz bulk insert no PostGIS
 cargo run -p ta-cli -- import-vector --input dados.shp --project minha-area
@@ -187,6 +239,11 @@ let path = client.get_map(&GetMapRequest {
 
 ## Status
 
+- **Fase 0 (usabilidade + baseline)**: `scripts/dev-up.sh` (provisionamento em
+  1 comando, com e sem docker), `ta-cli doctor` (exit 0/1 com remediação),
+  `ta-cli seed-demo` (projeto `demo` idempotente, dados sintéticos em
+  `testdata/monitoring/`), baseline `criterion` do `ta-db` publicado em
+  `benches/BASELINE.md` e step não-gating de baseline no CI — ✅
 - **Fase 4 (atual)**: packaging + release — rebrand Curupira GIS, binário
   `curupira-gis`, CI 3 jobs (Linux / Linux+PostGIS / Windows), release draft
   por tag com checksums + SBOM. Pendente: push, primeira run de CI, tag.
