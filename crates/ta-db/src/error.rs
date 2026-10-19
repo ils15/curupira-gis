@@ -98,6 +98,35 @@ pub enum Error {
     )]
     ClassInUseByRules { class_id: String, count: i64 },
 
+    /// A classe ainda decide células classificadas em rascunho(s) e não pode
+    /// ser apagada.
+    ///
+    /// FK `draft_cells.class_id → classes(id) ON DELETE RESTRICT`
+    /// (migração `0013`): a classificação gravada sobrevive à classe — nada
+    /// de apagar decisão em silêncio. O caminho de saída é apagar o(s)
+    /// rascunho(s) (`draft delete`) ou repetir com `--force` (decisões +
+    /// regras + classe numa única transação, com contagens reportadas).
+    #[error(
+        "classe `{class_id}` decide {count} célula(s) em rascunho(s); apague \
+         o(s) rascunho(s) com `draft delete` ou repita com --force para \
+         apagar as decisões junto"
+    )]
+    ClassInUseByDraftCells { class_id: String, count: i64 },
+
+    /// O ruleset ainda decide células classificadas em rascunho(s) e não
+    /// pode ser apagado.
+    ///
+    /// FK `draft_cells.ruleset_id → rulesets(id) ON DELETE RESTRICT`
+    /// (migração `0013`): a proveniência da classificação sobrevive ao
+    /// ruleset. O caminho de saída é apagar o(s) rascunho(s)
+    /// (`draft delete`) ou repetir com `--force`.
+    #[error(
+        "ruleset `{ruleset_id}` decide {count} célula(s) em rascunho(s); \
+         apague o(s) rascunho(s) com `draft delete` ou repita com --force \
+         para apagar as decisões junto"
+    )]
+    RuleSetInUseByDraftCells { ruleset_id: String, count: i64 },
+
     /// Corrida de versão ao gravar um ruleset: a unicidade
     /// `UNIQUE(project_id, name, version)` foi violada mesmo com o lock de
     /// linhagem (`pg_advisory_xact_lock`) — não é duplicidade de nome, é
@@ -115,6 +144,15 @@ pub enum Error {
          própria descendência"
     )]
     ClassParentCycle { class_id: String, parent_id: String },
+
+    /// Valor de medida não finito (NaN/±inf) — não é observação. O banco
+    /// recusa (`CHECK` na `0013`); esta variante adianta o erro com o nome da
+    /// medida para o operador corrigir a origem do valor.
+    #[error(
+        "valor da medida `{measure}` não é finito ({value}); corrija a origem — \
+         NaN/infinito não é observação válida"
+    )]
+    NonFiniteMeasure { measure: String, value: f64 },
 }
 
 /// Alias de resultado padrão da persistência.

@@ -418,28 +418,57 @@ pub struct Decision {
     pub skipped_invalid_names: Vec<String>,
 }
 
-/// Avalia `rules` contra `measures` e devolve a decisão de classe.
-///
-/// Regras inativas e predicados inválidos são ignorados (ver semântica no topo
-/// do módulo). Maior `priority` vence; empate → menor `name`.
-#[must_use]
-pub fn evaluate(rules: &[Rule], measures: &BTreeMap<String, f64>) -> Decision {
-    let mut winner: Option<&Rule> = None;
-    let mut evaluated = 0usize;
+/// Conjunto de regras **já parseadas** — o parse acontece uma vez
+/// (em [`prepare_rules`]), nunca por célula; a avaliação reutiliza este
+/// conjunto ([`evaluate_prepared`]). Regras inativas são descartadas no
+/// prepare; predicados inválidos são contados/nomeados uma única vez.
+pub(crate) struct PreparedRules {
+    /// Regras ativas com predicado válido, na ordem de entrada.
+    rules: Vec<(Rule, Predicate)>,
+    /// Quantidade de regras ativas ignoradas por predicado inválido.
+    skipped_invalid: usize,
+    /// Nomes das regras ignoradas (ordenados; rastro para o operador).
+    skipped_invalid_names: Vec<String>,
+}
+
+/// Parseia `rules` **uma vez** para avaliação em lote — o custo do parser é
+/// pago por lote, não por célula. Regras inativas não entram.
+pub(crate) fn prepare_rules(rules: &[Rule]) -> PreparedRules {
+    let mut prepared = Vec::new();
     let mut skipped_invalid = 0usize;
     let mut skipped_names = Vec::new();
-    let mut missing = BTreeSet::new();
-
     for rule in rules {
         if !rule.is_active {
             continue;
         }
-        let Ok(predicate) = parse_predicate(&rule.predicate) else {
-            skipped_invalid += 1;
-            skipped_names.push(rule.name.clone());
-            continue;
-        };
-        evaluated += 1;
+        match parse_predicate(&rule.predicate) {
+            Ok(predicate) => prepared.push((rule.clone(), predicate)),
+            Err(_) => {
+                skipped_invalid += 1;
+                skipped_names.push(rule.name.clone());
+            }
+        }
+    }
+    // Nomes em ordem, sem depender da ordem de entrada das regras.
+    skipped_names.sort();
+    PreparedRules {
+        rules: prepared,
+        skipped_invalid,
+        skipped_invalid_names: skipped_names,
+    }
+}
+
+/// Avalia um conjunto já parseado contra as medidas de UMA célula — mesma
+/// semântica de [`evaluate`] (maior prioridade vence; empate → menor nome),
+/// sem repetir o parse das regras.
+pub(crate) fn evaluate_prepared(
+    prepared: &PreparedRules,
+    measures: &BTreeMap<String, f64>,
+) -> Decision {
+    let mut winner: Option<&Rule> = None;
+    let mut missing = BTreeSet::new();
+
+    for (rule, predicate) in &prepared.rules {
         let mut rule_missing = Vec::new();
         if predicate.matches_collecting(measures, &mut rule_missing) {
             let wins = winner.is_none_or(|current| {
@@ -452,17 +481,25 @@ pub fn evaluate(rules: &[Rule], measures: &BTreeMap<String, f64>) -> Decision {
         }
         missing.extend(rule_missing);
     }
-    // Nomes em ordem, sem depender da ordem de entrada das regras.
-    skipped_names.sort();
 
     Decision {
         class_id: winner.map(|rule| rule.class_id.clone()),
         rule_id: winner.map(|rule| rule.id.clone()),
-        evaluated,
+        evaluated: prepared.rules.len(),
         missing_measures: missing.into_iter().collect(),
-        skipped_invalid,
-        skipped_invalid_names: skipped_names,
+        skipped_invalid: prepared.skipped_invalid,
+        skipped_invalid_names: prepared.skipped_invalid_names.clone(),
     }
+}
+
+/// Avalia `rules` contra `measures` e devolve a decisão de classe.
+///
+/// Regras inativas e predicados inválidos são ignorados (ver semântica no topo
+/// do módulo). Maior `priority` vence; empate → menor `name`.
+#[must_use]
+pub fn evaluate(rules: &[Rule], measures: &BTreeMap<String, f64>) -> Decision {
+    // Parse uma única vez; a semântica é idêntica ao caminho preparado.
+    evaluate_prepared(&prepare_rules(rules), measures)
 }
 
 #[cfg(test)]

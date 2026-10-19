@@ -233,6 +233,28 @@ impl DraftLayer {
     }
 }
 
+/// Medida observada de uma célula (`cell_measures`) — entrada da classificação.
+///
+/// Uma linha por (célula, medida); regravar a mesma medida é upsert. O valor é
+/// sempre finito (CHECK no banco; validação no repositório).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CellMeasure {
+    /// Camada de células da medição.
+    pub cell_layer_id: String,
+    /// Célula medida (`"<col>_<row>"`).
+    pub cell_id: String,
+    /// Nome da medida (mesma gramática dos predicados; ex.: `ndvi`).
+    pub measure: String,
+    /// Valor observado (finito).
+    pub value: f64,
+    /// Proveniência livre (ex.: cena/índice de origem).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Momento da última gravação (`cell_measures.updated_on`).
+    #[serde(default = "OffsetDateTime::now_utc", with = "time::serde::rfc3339")]
+    pub updated_on: OffsetDateTime,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

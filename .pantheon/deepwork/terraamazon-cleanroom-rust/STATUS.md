@@ -1004,7 +1004,8 @@ domain-first**; não substitui nem reescreve o histórico v0.1–v0.2.2 acima.
   `0007_grid_srid` (retificação da Decisão 4 em 2026-10-18),
   `0008_cell_validity` (gate de validade em `cells`), `0009_classes`,
   `0010_rules`, `0011_rule_class_restrict` (Fase 2 — FK
-  `rules.class_id` com `ON DELETE RESTRICT`), `0012_queue`, `0013_scenes`.
+  `rules.class_id` com `ON DELETE RESTRICT`), `0012_queue`, `0013_drafts_measures`,
+  `0014_scenes`.
 - **Metas:** cobertura **70% global / 85%** em `ta-engine` e repos de `ta-db`;
   **zero `unwrap`/`expect`** em libs não-teste.
 
@@ -1036,13 +1037,13 @@ domain-first**; não substitui nem reescreve o histórico v0.1–v0.2.2 acima.
 | 0 | Usabilidade ponta a ponta (dev-up.sh, doctor, seed-demo, baseline, CI não-gating, docs) | **concluída** (2026-10-17/18) |
 | 1 | Projeto / Fase / AOI / Células bloqueadas (`0005`, `0006`, `0007`, `0008`) | **implementada e revisada** (Themis, 2026-10-18: aprovada com ressalvas); achados aplicados, **aguardando commit** |
 | 2 | Classes e regras/rulesets (`0009`, `0010`, `0011_rule_class_restrict`) | **implementada; revisão Themis aplicada** (2026-10-18), **aguardando commit** |
-| 3 | Fila de processos + classificação básica (`0012_queue`) | **pendente** |
-| 4 | Scenes / exchange (`0013_scenes`) — paralelizável após a Fase 1 | **pendente** |
+| 3 | Fila de processos + classificação básica (`0012_queue`, `0013_drafts_measures`) | **implementada; revisão Themis aplicada** (2026-10-18/19), **aguardando commit** — 306 testes; 13/13 migrações; grade de 118 células; retomada e claim concorrente provados |
+| 4 | Scenes / exchange (`0014_scenes`) — paralelizável após a Fase 1 | **pendente** |
 | 5 | Área, import/export e visualização | **pendente** |
 | 6 | Paridade comportamental e fechamento | **pendente** |
 
-**Fase 0 concluída; Fases 1 e 2 implementadas/revisadas, aguardando commit.**
-Fases 3–6 não iniciadas. Nenhum ADR criado (não solicitado).
+**Fase 0 concluída; Fases 1–3 implementadas/revisadas, aguardando commit.**
+Fases 4–6 não iniciadas. Nenhum ADR criado (não solicitado).
 
 ### Fechamento da revisão da Fase 1 (2026-10-18)
 
@@ -1052,7 +1053,7 @@ Themis aprovou com ressalvas; os achados de fechamento foram aplicados:
   rejeita `NOT ST_IsValid(geom)` com mensagem acionável — mesma política de
   `features`, sem reparo silencioso. Idempotente. As migrações **futuras**
   foram renumeradas: classes `0009`, rules `0010`, e (Fase 2 em diante)
-  `0011_rule_class_restrict`, queue `0012`, scenes `0013`.
+  `0011_rule_class_restrict`, queue `0012`, drafts/measures `0013`, scenes `0014`.
 - `bulk_insert` de células roda em **transação única** (falha em qualquer lote
   não deixa grade parcial — o seed decide idempotência por `count > 0`).
 - `bulk_insert`/`bulk_insert_on` exigem `srid` **explícito** e o validam contra
@@ -1103,7 +1104,7 @@ não commitada); os achados foram aplicados por Hermes — **nada commitado**.
   mostra a contagem e **bloqueia** sem `--force`; com `--force`, regras +
   classe caem numa **única transação** (`PgClassRepo::delete_with_rules`).
   Consequência de numeração registrada: `0012_queue` (Fase 3),
-  `0013_scenes` (Fase 4).
+  `0013_drafts_measures` (Fase 3), `0014_scenes` (Fase 4).
 - **F2 — corrida de versão:** `PgRuleSetRepo::create` substitui
   "MAX(version)+1 + retry único" por **`pg_advisory_xact_lock`**
   (`hashtext(project_id || ':' || name)`) envolvendo SELECT MAX + INSERT na
@@ -1164,3 +1165,68 @@ casos de `or`/`not` do motor foram reescritos para a política nova e o caso
 que classificava `agua` por negação sem observação vira "nenhuma classe"
 (`regra_not_sem_medida_nao_decide_classe`). Nenhum teste de produção
 assumia a semântica antiga fora do motor.
+
+### Fechamento da revisão da Fase 3 (2026-10-18/19)
+
+Themis revisou a Fase 3 (fila de processos + classificação básica, na árvore
+de trabalho, não commitada); os achados foram aplicados por Hermes —
+**nada commitado**.
+
+- **M1 — saída para o operador em delete com `draft_cells`** (FKs
+  `ON DELETE RESTRICT` da `0013` ganharam caminho de saída; nada silencioso):
+  - **`draft delete --project <id> --name <n> [--yes]`** (novo): mostra
+    ANTES a contagem de células classificadas; sem `--yes` **bloqueia**
+    (rascunho é derivado, mas a remoção é destrutiva — intenção explícita);
+    com `--yes` apaga o rascunho e as decisões (CASCADE) reportando a
+    contagem. Repo: `PgDraftLayerRepo::{get, count_cells, delete}`.
+  - **`class delete`**: pré-checagem de `draft_cells` além das regras
+    (repo `count_drafts_for_class` — contagem por rascunho COM nome). Sem
+    `--force`: bloqueia com "classe `X` decide N célula(s) em M rascunho(s):
+    …; apague o(s) rascunho(s) com `draft delete` ou repita com --force".
+    Com `--force`: **uma transação** apaga draft_cells + regras + classe e
+    **reporta as três contagens** (repo `delete_force` →
+    `ClassForceDeleted`). O `delete` simples passou a **discriminar a FK**
+    pelo nome da constraint: violação de `draft_cells_class_id_fkey` vira
+    `Error::ClassInUseByDraftCells` (antes seria relatado como "usada por
+    regra(s)" mesmo sem regra).
+  - **`ruleset delete --project <id> --name <n> [--version v] [--force]`**
+    (novo): mesma pré-checagem (`count_drafts_for_ruleset`); sem `--force`
+    com decisões: bloqueia; com `--force`: draft_cells + regras + ruleset
+    numa transação com as três contagens (`RuleSetForceDeleted`); sem
+    decisões: apaga com contagem de regras em cascata. O `delete` do
+    ruleset também traduz a FK (`Error::RuleSetInUseByDraftCells`).
+- **m2 — `task cancel` de task concluída**: recusado com
+  "task `X` já concluída; nada a cancelar" quando
+  pendentes+running+error = 0 — `done` (histórico de sucesso) não vira
+  `cancelled`; task `failed` continua cancelável (cancelling impede retry).
+- **m3 — `DraftCell` morto**: tipo removido de `ta-core` (nunca usado em
+  assinatura — as linhas de rascunho gravam por tuplas em
+  `draft_upsert_on`; YAGNI).
+- **m5 — rascunho de outra grade**: `task create` (rascunho existente) e
+  `task run` (pré-voo, inclui rascunho APAGADO como erro próprio) validam
+  `task.cell_layer == draft_layer.cell_layer` — erro acionável
+  ("o rascunho `X` pertence à grade `Y`, mas a task usa a grade `Z`").
+- **Registros (não implementar agora)**: Fase 4 — `cell_measures` com
+  proveniência por cena (`scene_id` NULL FK→scenes; last-write-wins por
+  `(cell_layer, cell_id, measure)`; PK inalterada) e Fase 5 — extração do
+  executor para crate próprio (`ta-flow`) antes da GUI; risco transversal
+  novo no PLAN §11: **toda FK RESTRICT nova vem com pré-checagem +
+  mensagem acionável + caminho de saída** (padrão M1).
+
+**Números reais do fechamento:** **306 testes** (300 na revisão + 6 novos:
+5 CLI gated — `draft delete` sem/com `--yes`, `class delete` bloqueando com
+contagens/nomes e `--force` com 3 contagens, `ruleset delete` idem,
+`task cancel` de done recusado, rascunho de outra grade recusado no create
+e no run — e 1 repo gated: recusas tipadas + discriminação de FK +
+`delete_force` com as três contagens). Migrações **13/13**. `DraftCell`
+removido sem quebrar compilação (nenhum uso real).
+
+**Verificação real (2026-10-19):** `cargo fmt --all -- --check` ✓ ·
+`cargo clippy --workspace --all-targets -- -D warnings` ✓ ·
+`cargo test --workspace` ✓ (unitária) · `TA_TEST_PG=1 TA_PG_DSN=… cargo
+test --workspace` ✓ **306/306** (PG16+PostGIS 3.4 real) · ponta a ponta
+real pelos testes CLI: classe→regra→medidas→`task run`→`draft_cells`, e os
+seis fluxos de delete/cancel/grade listados acima provados contra o binário
+real · `dev-up.sh` 2× idempotente.
+
+**Nada commitado** — o usuário faz commits manualmente.

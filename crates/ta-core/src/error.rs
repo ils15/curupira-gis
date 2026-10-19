@@ -42,6 +42,28 @@ pub enum Error {
     /// Estado de rascunho desconhecido lido da persistência.
     #[error("estado de rascunho inválido: {0:?} (esperado `draft` ou `consolidated`)")]
     InvalidDraftState(String),
+
+    /// Kind de task desconhecido lido da persistência (`tasks.kind`).
+    #[error("kind de task inválido: {0:?} (esperado `classify`)")]
+    InvalidTaskKind(String),
+
+    /// Estado de task desconhecido lido da persistência (`tasks.status`).
+    #[error(
+        "estado de task inválido: {0:?} (esperado `pending`, `running`, `done`, \
+         `cancelled` ou `failed`)"
+    )]
+    InvalidTaskStatus(String),
+
+    /// Estado de processo desconhecido lido da persistência.
+    #[error(
+        "estado de processo inválido: {0:?} (esperado `pending`, `running`, \
+         `done` ou `error`)"
+    )]
+    InvalidProcessStatus(String),
+
+    /// Nível de log desconhecido lido da persistência (`cell_log.level`).
+    #[error("nível de log inválido: {0:?} (esperado `info`, `warn` ou `error`)")]
+    InvalidLogLevel(String),
 }
 
 /// Erros do motor de grade (`ta-engine`), tipados — nunca uma `String` solta.

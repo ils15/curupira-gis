@@ -15,10 +15,12 @@ pub mod phase;
 pub mod project;
 pub mod rule;
 pub mod style;
+pub mod task;
 
 pub use aoi::{AoiLayer, AreaSettings};
 pub use cell::{BlockedCell, Cell, CellLayer, GridSpec};
-pub use classification::{Class, ClassGroup, DraftLayer, DraftState};
+pub use classification::{CellMeasure, Class, ClassGroup, DraftLayer, DraftState};
 pub use error::{Error, GridError, Result};
 pub use phase::Phase;
 pub use rule::{Rule, RuleError, RuleSet};
+pub use task::{CellLogEntry, LogLevel, Process, ProcessStatus, Task, TaskKind, TaskStatus};

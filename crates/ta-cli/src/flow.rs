@@ -700,10 +700,12 @@ pub async fn class_update(
 
 /// `class delete` — remove uma classe.
 ///
-/// Pré-checagem mostra a contagem de regras que decidem a classe: sem
-/// `--force`, o delete é **bloqueado** com a mensagem acionável (a FK é
-/// `ON DELETE RESTRICT` desde a migração `0011`); com `--force`, as regras e
-/// a classe caem numa **única transação** (intenção explícita do operador).
+/// Pré-checagem mostra a contagem de regras que decidem a classe E das
+/// células que ela decide em rascunho(s) (`draft_cells` é
+/// `ON DELETE RESTRICT` desde a migração `0013`): sem `--force`, o delete é
+/// **bloqueado** com a mensagem acionável; com `--force`, as decisões de
+/// rascunho, as regras e a classe caem numa **única transação**, com as
+/// três contagens reportadas (intenção explícita do operador).
 pub async fn class_delete(
     dsn: Option<&str>,
     project: &str,
@@ -719,8 +721,25 @@ pub async fn class_delete(
         .count_for_class(&existing.id)
         .await
         .map_err(|e| e.to_string())?;
-    if rules_using > 0 && !force {
+    let drafts_using = repo
+        .count_drafts_for_class(&existing.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let cells_in_drafts: i64 = drafts_using.iter().map(|(_, cells)| cells).sum();
+
+    if !force && (rules_using > 0 || cells_in_drafts > 0) {
         pool.close().await;
+        if cells_in_drafts > 0 {
+            let names: Vec<&str> = drafts_using.iter().map(|(name, _)| name.as_str()).collect();
+            return Err(format!(
+                "classe `{}` decide {} célula(s) em {} rascunho(s): {}; apague \
+                 o(s) rascunho(s) com `draft delete` ou repita com --force",
+                existing.name,
+                cells_in_drafts,
+                drafts_using.len(),
+                names.join(", ")
+            ));
+        }
         return Err(format!(
             "classe `{}` é usada por {} regra(s); remova/reaponte as regras \
              (`rule remove`) ou desative a classe, ou repita com --force para \
@@ -728,26 +747,34 @@ pub async fn class_delete(
             existing.name, rules_using
         ));
     }
-    let removed = if rules_using > 0 {
-        // `--force` com regras: regras + classe atomicamente (transação única
-        // no repositório; sem janela em que a classe some sem as regras).
-        repo.delete_with_rules(&existing.id).await
-    } else {
-        repo.delete(&existing.id).await
+    if force {
+        // `--force`: decisões de rascunho + regras + classe numa transação
+        // única, com as três contagens reportadas.
+        let report = repo
+            .delete_force(&existing.id)
+            .await
+            .map_err(|e| class_delete_error(&e, &existing.name))?;
+        if !report.class {
+            pool.close().await;
+            return Err(format!("classe `{class}` não existe mais"));
+        }
+        println!(
+            "classe removida: {}\t{}\t(decisões em rascunho apagadas: {}, \
+             regras apagadas: {} — transação única)",
+            existing.id, existing.name, report.draft_cells, report.rules
+        );
+        pool.close().await;
+        return Ok(());
     }
-    .map_err(|e| class_delete_error(&e, &existing.name))?;
+    let removed = repo
+        .delete(&existing.id)
+        .await
+        .map_err(|e| class_delete_error(&e, &existing.name))?;
     if !removed {
         pool.close().await;
         return Err(format!("classe `{class}` não existe mais"));
     }
-    if rules_using > 0 {
-        println!(
-            "classe removida: {}\t{}\t({} regra(s) removida(s) na mesma transação)",
-            existing.id, existing.name, rules_using
-        );
-    } else {
-        println!("classe removida: {}\t{}", existing.id, existing.name);
-    }
+    println!("classe removida: {}\t{}", existing.id, existing.name);
     pool.close().await;
     Ok(())
 }
@@ -821,6 +848,62 @@ pub async fn draft_list(dsn: Option<&str>, project: &str) -> Result<(), String> 
             draft.name
         );
     }
+    pool.close().await;
+    Ok(())
+}
+
+/// `draft delete` — apaga o rascunho e as células classificadas nele
+/// (`draft_cells` cai por CASCADE, migração 0013).
+///
+/// O rascunho é derivado (reclassificar recria), mas a remoção é
+/// **destrutiva**: a contagem de células classificadas é mostrada ANTES e,
+/// sem `--yes`, o delete é **bloqueado** — intenção explícita do operador.
+pub async fn draft_delete(
+    dsn: Option<&str>,
+    project: &str,
+    name: &str,
+    yes: bool,
+) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let drafts = PgDraftLayerRepo::new(pool.clone());
+    let draft = drafts
+        .list_for_project(&project.id)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|d| d.name == name)
+        .ok_or_else(|| {
+            format!(
+                "rascunho `{name}` não existe no projeto `{}`; veja `draft list`",
+                project.name
+            )
+        })?;
+    let cells = drafts
+        .count_cells(&draft.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !yes {
+        pool.close().await;
+        return Err(format!(
+            "rascunho `{}` guarda {} célula(s) classificada(s); apagar o \
+             rascunho apaga também essas decisões — repita com --yes para \
+             confirmar",
+            draft.name, cells
+        ));
+    }
+    let removed = drafts
+        .delete(&draft.id)
+        .await
+        .map_err(|e| format!("remover rascunho `{}`: {e}", draft.name))?;
+    if !removed {
+        pool.close().await;
+        return Err(format!("rascunho `{name}` não existe mais"));
+    }
+    println!(
+        "rascunho apagado: {}\t{}\t(células classificadas removidas: {cells})",
+        draft.id, draft.name
+    );
     pool.close().await;
     Ok(())
 }
@@ -921,6 +1004,91 @@ pub async fn ruleset_show(
             rule.predicate
         );
     }
+    pool.close().await;
+    Ok(())
+}
+
+/// `ruleset delete` — remove um ruleset (as regras caem em cascata).
+///
+/// Pré-checagem de `draft_cells` (FK `ON DELETE RESTRICT` da 0013): ruleset
+/// que decide células classificadas é RECUSADO sem `--force`, com contagem e
+/// nomes dos rascunhos; com `--force`, decisões de rascunho + regras +
+/// ruleset caem numa **única transação**, com as três contagens reportadas —
+/// nada silencioso.
+pub async fn ruleset_delete(
+    dsn: Option<&str>,
+    project: &str,
+    name: &str,
+    version: Option<i32>,
+    force: bool,
+) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
+    let repo = PgRuleSetRepo::new(pool.clone());
+    let ruleset = repo
+        .find(&project.id, name, version)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "ruleset `{name}`{} não existe no projeto `{}`; veja `ruleset list`",
+                version
+                    .map(|v| format!(" (versão {v})"))
+                    .unwrap_or_default(),
+                project.name
+            )
+        })?;
+    let drafts_using = repo
+        .count_drafts_for_ruleset(&ruleset.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let cells_in_drafts: i64 = drafts_using.iter().map(|(_, cells)| cells).sum();
+    if cells_in_drafts > 0 && !force {
+        pool.close().await;
+        let names: Vec<&str> = drafts_using.iter().map(|(name, _)| name.as_str()).collect();
+        return Err(format!(
+            "ruleset `{}` (v{}) decide {} célula(s) em {} rascunho(s): {}; \
+             apague o(s) rascunho(s) com `draft delete` ou repita com --force",
+            ruleset.name,
+            ruleset.version,
+            cells_in_drafts,
+            drafts_using.len(),
+            names.join(", ")
+        ));
+    }
+    if force {
+        let report = repo
+            .delete_force(&ruleset.id)
+            .await
+            .map_err(|e| format!("remover ruleset `{}`: {e}", ruleset.name))?;
+        if !report.ruleset {
+            pool.close().await;
+            return Err(format!("ruleset `{name}` não existe mais"));
+        }
+        println!(
+            "ruleset removido: {}\t{}\tv{}\t(decisões em rascunho apagadas: {}, \
+             regras apagadas: {} — transação única)",
+            ruleset.id, ruleset.name, ruleset.version, report.draft_cells, report.rules
+        );
+        pool.close().await;
+        return Ok(());
+    }
+    let rules_before = PgRuleRepo::new(pool.clone())
+        .count_for_ruleset(&ruleset.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let removed = repo
+        .delete(&ruleset.id)
+        .await
+        .map_err(|e| format!("remover ruleset `{}`: {e}", ruleset.name))?;
+    if !removed {
+        pool.close().await;
+        return Err(format!("ruleset `{name}` não existe mais"));
+    }
+    println!(
+        "ruleset removido: {}\t{}\tv{}\t(regras removidas em cascata: {rules_before})",
+        ruleset.id, ruleset.name, ruleset.version
+    );
     pool.close().await;
     Ok(())
 }
@@ -1188,7 +1356,7 @@ async fn resolve_class(pool: &PgPool, project_id: &str, id_or_name: &str) -> Res
 }
 
 /// Valida que a camada de células é do projeto e devolve o id canônico.
-async fn ensure_cell_layer_in_project(
+pub(crate) async fn ensure_cell_layer_in_project(
     pool: &PgPool,
     project_id: &str,
     cell_layer_id: &str,

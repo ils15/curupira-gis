@@ -45,8 +45,10 @@ pub trait ClassRepo: Send + Sync {
 
 /// Contrato do repositório de camadas de rascunho.
 ///
-/// Só `create`/`list` nesta fase: a consolidação (`state`) e a edição da
-/// classificação por célula chegam com a fila de processos (Fase 3).
+/// `create`/`list` no trait; as operações de remoção/leitura pontual ficam
+/// como métodos inerentes de [`PgDraftLayerRepo`] (o mesmo padrão de
+/// `PgTaskRepo`): `get`, `count_cells` e `delete` servem ao pré-voo do
+/// `task run` e ao `draft delete` (destrutivo, exige confirmação na CLI).
 #[async_trait]
 pub trait DraftLayerRepo: Send + Sync {
     /// Insere o rascunho; id vazio deixa o banco gerar o UUID.
@@ -239,6 +241,69 @@ impl PgClassRepo {
         tx.commit().await?;
         Ok(res.rows_affected() > 0)
     }
+
+    /// Pré-checagem do `class delete` sobre `draft_cells`
+    /// (`draft_cells.class_id` é `ON DELETE RESTRICT` na 0013): quantas
+    /// células a classe decide em CADA rascunho — `(nome do rascunho,
+    /// células nele)`, ordenado por nome. A CLI soma e lista os nomes na
+    /// mensagem acionável.
+    pub async fn count_drafts_for_class(&self, class_id: &str) -> Result<Vec<(String, i64)>> {
+        check_id(class_id)?;
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT dl.name, count(*) \
+                 FROM draft_cells dc \
+                 JOIN draft_layers dl ON dl.id = dc.draft_layer_id \
+                 WHERE dc.class_id = $1::uuid \
+                 GROUP BY dl.name ORDER BY dl.name",
+        )
+        .bind(class_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Caminho do `class delete --force`: numa **única transação** apaga as
+    /// `draft_cells` que a classe decide, as regras que a apontam e a
+    /// classe — e devolve AS TRÊS CONTAGENS (nada silencioso; ou sai tudo,
+    /// ou o rollback não deixa sair nada).
+    pub async fn delete_force(&self, id: &str) -> Result<ClassForceDeleted> {
+        check_id(id)?;
+        let mut tx = self.pool.begin().await?;
+        let draft_cells = sqlx::query("DELETE FROM draft_cells WHERE class_id = $1::uuid")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        let rules = sqlx::query("DELETE FROM rules WHERE class_id = $1::uuid")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        let class = sqlx::query("DELETE FROM classes WHERE id = $1::uuid")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+        tx.commit().await?;
+        Ok(ClassForceDeleted {
+            draft_cells,
+            rules,
+            class,
+        })
+    }
+}
+
+/// Contagens do `class delete --force` — as três remoções da transação
+/// única, reportadas ao operador (nada silencioso).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassForceDeleted {
+    /// Células classificadas removidas (`draft_cells` que a classe decidia).
+    pub draft_cells: u64,
+    /// Regras removidas.
+    pub rules: u64,
+    /// `true` se a classe foi apagada (`false` = já não existia).
+    pub class: bool,
 }
 
 /// Limite de profundidade ao subir a cadeia de `parent_id` (F6): a
@@ -347,9 +412,27 @@ impl ClassRepo for PgClassRepo {
             .await
         {
             Ok(res) => Ok(res.rows_affected() > 0),
-            // FK `rules.class_id ON DELETE RESTRICT` (0011): traduz a recusa
-            // do banco em contagem acionável, não em erro cru de SQL.
+            // FKs `ON DELETE RESTRICT` (0011 regras; 0013 draft_cells):
+            // traduz a recusa do banco em contagem acionável, discriminando
+            // QUAL referência recusou pelo nome da constraint (padrão do
+            // Postgres `<tabela>_<coluna>_fkey`).
             Err(err) if is_foreign_key_violation(&err) => {
+                let constraint = match &err {
+                    sqlx::Error::Database(db) => db.constraint().unwrap_or_default(),
+                    _ => "",
+                };
+                if constraint == "draft_cells_class_id_fkey" {
+                    let count: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM draft_cells WHERE class_id = $1::uuid",
+                    )
+                    .bind(id)
+                    .fetch_one(&self.pool)
+                    .await?;
+                    return Err(Error::ClassInUseByDraftCells {
+                        class_id: id.to_owned(),
+                        count,
+                    });
+                }
                 let count: i64 =
                     sqlx::query_scalar("SELECT count(*) FROM rules WHERE class_id = $1::uuid")
                         .bind(id)
@@ -399,6 +482,46 @@ pub struct PgDraftLayerRepo {
 impl PgDraftLayerRepo {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Busca por id (`None` = ausente) — pré-voo do `task run`: o rascunho
+    /// da task precisa existir e pertencer à MESMA grade da task.
+    pub async fn get(&self, id: &str) -> Result<Option<DraftLayer>> {
+        check_id(id)?;
+        let row: Option<DraftRow> = sqlx::query_as(
+            "SELECT id::text, project_id::text, phase_id::text, cell_layer_id::text, name, \
+                    state, created_at, updated_at \
+             FROM draft_layers WHERE id = $1::uuid",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(draft_from_row).transpose()
+    }
+
+    /// Quantas células classificadas o rascunho guarda — a contagem que o
+    /// `draft delete` mostra ANTES de apagar (o rascunho é derivado, mas a
+    /// remoção é destrutiva e exige intenção explícita na CLI).
+    pub async fn count_cells(&self, draft_layer_id: &str) -> Result<i64> {
+        check_id(draft_layer_id)?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM draft_cells WHERE draft_layer_id = $1::uuid")
+                .bind(draft_layer_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(count)
+    }
+
+    /// Remove o rascunho; `draft_cells` cai por CASCADE (0013) — a remoção
+    /// é sempre EXPLÍCITA na camada de rascunho, nunca efeito colateral de
+    /// apagar outro objeto. `Ok(false)` = rascunho ausente.
+    pub async fn delete(&self, draft_layer_id: &str) -> Result<bool> {
+        check_id(draft_layer_id)?;
+        let res = sqlx::query("DELETE FROM draft_layers WHERE id = $1::uuid")
+            .bind(draft_layer_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
     }
 }
 

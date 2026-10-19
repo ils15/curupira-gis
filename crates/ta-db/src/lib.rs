@@ -7,6 +7,8 @@
 //!   monitoramento (fase, AOI/área, camadas de células/células/bloqueios).
 //! - [`repo_class`], [`repo_ruleset`]: classes/grupos/rascunhos e
 //!   rulesets versionados/regras (Fase 2).
+//! - [`repo_task`]: fila de processos — tasks, processos por célula, log por
+//!   célula, medidas e gravação de rascunho (Fase 3).
 //! - [`spatial`]: utilitários espaciais do banco (DDL, COPY BINARY, MVT).
 //! - [`ops`]: processamento espacial server-side (buffer/interseção/união —
 //!   camadas derivadas, v0.2 GUI).
@@ -23,6 +25,7 @@ pub mod repo_cell;
 pub mod repo_class;
 pub mod repo_phase;
 pub mod repo_ruleset;
+pub mod repo_task;
 pub mod spatial;
 
 pub use error::{Error, Result};

@@ -28,6 +28,7 @@ use ta_db::pool::{self, DbConfig};
 mod doctor;
 mod dsn;
 mod flow;
+mod flow_task;
 mod import;
 mod migrate;
 mod seed;
@@ -241,6 +242,21 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RuleCmd,
     },
+    /// Medidas observadas por célula — set/list/clear (Fase 3).
+    Measure {
+        #[command(subcommand)]
+        cmd: MeasureCmd,
+    },
+    /// Fila de processos — create/run/list/show/cancel/retry (Fase 3).
+    Task {
+        #[command(subcommand)]
+        cmd: TaskCmd,
+    },
+    /// Processos de uma task — lista por estado (Fase 3).
+    Process {
+        #[command(subcommand)]
+        cmd: ProcessCmd,
+    },
 }
 
 /// Subcomandos de `phase`.
@@ -367,6 +383,20 @@ enum CellCmd {
         /// Id (UUID) da camada de células.
         #[arg(long)]
         cell_layer: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Mostra o log de execução de uma célula (fila de processos, Fase 3).
+    Log {
+        /// Id (UUID) da camada de células.
+        #[arg(long)]
+        cell_layer: String,
+        /// Identificador da célula (`"<col>_<row>"`).
+        #[arg(long)]
+        cell_id: String,
+        /// Filtra por task (id UUID).
+        #[arg(long)]
+        task: Option<String>,
         #[arg(long)]
         dsn: Option<String>,
     },
@@ -535,6 +565,22 @@ enum DraftCmd {
         #[arg(long)]
         dsn: Option<String>,
     },
+    /// Apaga o rascunho e as células classificadas nele (CASCADE) — sem
+    /// --yes bloqueia mostrando a contagem (destrutivo; intenção explícita).
+    Delete {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Nome do rascunho.
+        #[arg(long)]
+        name: String,
+        /// Confirma a remoção (o rascunho é derivado, mas apagar decisões
+        /// classificadas é destrutivo).
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
 }
 
 /// Subcomandos de `ruleset`.
@@ -572,6 +618,41 @@ enum RulesetCmd {
         /// Versão específica (padrão: a mais recente).
         #[arg(long)]
         version: Option<i32>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Torna este ruleset o ATIVO do projeto — o default do `task create`
+    /// (desativa os demais; no máximo um ativo por projeto).
+    Activate {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Nome do ruleset.
+        #[arg(long)]
+        name: String,
+        /// Versão específica (padrão: a mais recente da linhagem).
+        #[arg(long)]
+        version: Option<i32>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Remove um ruleset (regras caem em cascata). Bloqueia se houver células
+    /// classificadas decididas por ele (mostra contagem/nomes), salvo
+    /// --force (decisões + regras + ruleset numa única transação).
+    Delete {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Nome do ruleset.
+        #[arg(long)]
+        name: String,
+        /// Versão específica (padrão: a mais recente da linhagem).
+        #[arg(long)]
+        version: Option<i32>,
+        /// Apaga TAMBÉM as decisões de rascunho que o ruleset decidiu, numa
+        /// única transação.
+        #[arg(long)]
+        force: bool,
         #[arg(long)]
         dsn: Option<String>,
     },
@@ -650,6 +731,137 @@ enum RuleCmd {
         /// Medidas no formato `nome=valor,nome=valor` (ex.: `ndvi=0.7,nbr=0.05`).
         #[arg(long, allow_hyphen_values = true)]
         obs: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+}
+
+/// Subcomandos de `measure`.
+#[derive(Debug, Subcommand)]
+enum MeasureCmd {
+    /// Grava (upsert) as medidas de UMA célula.
+    Set {
+        /// Id (UUID) da camada de células.
+        #[arg(long)]
+        cell_layer: String,
+        /// Identificador da célula (`"<col>_<row>"`).
+        #[arg(long)]
+        cell_id: String,
+        /// Medidas no formato `nome=valor,nome=valor` (ex.: `ndvi=0.7,nbr=0.05`).
+        #[arg(long, allow_hyphen_values = true)]
+        values: String,
+        /// Proveniência livre (ex.: cena/índice de origem).
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Lista as medidas da camada (opcionalmente de uma célula).
+    List {
+        /// Id (UUID) da camada de células.
+        #[arg(long)]
+        cell_layer: String,
+        /// Filtra por célula.
+        #[arg(long)]
+        cell_id: Option<String>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Remove as medidas da camada (opcionalmente de uma célula).
+    Clear {
+        /// Id (UUID) da camada de células.
+        #[arg(long)]
+        cell_layer: String,
+        /// Filtra por célula.
+        #[arg(long)]
+        cell_id: Option<String>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+}
+
+/// Subcomandos de `task`.
+#[derive(Debug, Subcommand)]
+enum TaskCmd {
+    /// Enfileira uma task de classificação por célula (Fase 3).
+    Create {
+        /// Tipo de trabalho (só `classify` nesta fase).
+        #[arg(value_parser = ["classify"])]
+        kind: String,
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Id (UUID) da camada de células alvo.
+        #[arg(long)]
+        cell_layer: String,
+        /// Id (UUID) do ruleset (padrão: o ATIVO do projeto).
+        #[arg(long)]
+        ruleset: Option<String>,
+        /// Nome do rascunho (padrão `rascunho <ruleset>`; existente é
+        /// reaproveitado — reclassificação é upsert).
+        #[arg(long)]
+        draft_layer: Option<String>,
+        /// Nome de exibição da task.
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Processa a task em lotes transacionais (retomável; `--limit` para
+    /// processar no máximo N células nesta invocação).
+    Run {
+        /// Id (UUID) da task.
+        task: String,
+        /// Máximo de células a processar nesta invocação.
+        #[arg(long)]
+        limit: Option<u64>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Lista as tasks do projeto (ou todas, sem --project).
+    List {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Mostra a task e as contagens de processos por estado.
+    Show {
+        /// Id (UUID) da task.
+        task: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Cancela cooperativamente (o lote em voo termina; pendentes nunca mais
+    /// são reclamados).
+    Cancel {
+        /// Id (UUID) da task.
+        task: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Repõe os processos com erro na fila (error → pending; `done` nunca é
+    /// reprocessado).
+    Retry {
+        /// Id (UUID) da task.
+        task: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+}
+
+/// Subcomandos de `process`.
+#[derive(Debug, Subcommand)]
+enum ProcessCmd {
+    /// Lista os processos da task (opcionalmente por estado).
+    List {
+        /// Id (UUID) da task.
+        #[arg(long)]
+        task: String,
+        /// Filtra por estado (pending|running|done|error).
+        #[arg(long)]
+        status: Option<String>,
         #[arg(long)]
         dsn: Option<String>,
     },
@@ -832,6 +1044,12 @@ async fn main() -> ExitCode {
             CellCmd::ListBlocked { cell_layer, dsn } => {
                 flow::cell_list_blocked(dsn.as_deref(), &cell_layer).await
             }
+            CellCmd::Log {
+                cell_layer,
+                cell_id,
+                task,
+                dsn,
+            } => flow_task::cell_log(dsn.as_deref(), &cell_layer, &cell_id, task.as_deref()).await,
         },
         Cmd::Class { cmd } => match cmd {
             ClassCmd::Create {
@@ -924,6 +1142,12 @@ async fn main() -> ExitCode {
                 .await
             }
             DraftCmd::List { project, dsn } => flow::draft_list(dsn.as_deref(), &project).await,
+            DraftCmd::Delete {
+                project,
+                name,
+                yes,
+                dsn,
+            } => flow::draft_delete(dsn.as_deref(), &project, &name, yes).await,
         },
         Cmd::Ruleset { cmd } => match cmd {
             RulesetCmd::Create {
@@ -939,6 +1163,19 @@ async fn main() -> ExitCode {
                 version,
                 dsn,
             } => flow::ruleset_show(dsn.as_deref(), &project, &name, version).await,
+            RulesetCmd::Activate {
+                project,
+                name,
+                version,
+                dsn,
+            } => flow_task::ruleset_activate(dsn.as_deref(), &project, &name, version).await,
+            RulesetCmd::Delete {
+                project,
+                name,
+                version,
+                force,
+                dsn,
+            } => flow::ruleset_delete(dsn.as_deref(), &project, &name, version, force).await,
         },
         Cmd::Rule { cmd } => match cmd {
             RuleCmd::Add {
@@ -975,6 +1212,68 @@ async fn main() -> ExitCode {
             }
             RuleCmd::Eval { ruleset, obs, dsn } => {
                 flow::rule_eval(dsn.as_deref(), &ruleset, &obs).await
+            }
+        },
+        Cmd::Measure { cmd } => match cmd {
+            MeasureCmd::Set {
+                cell_layer,
+                cell_id,
+                values,
+                source,
+                dsn,
+            } => {
+                flow_task::measure_set(dsn.as_deref(), &cell_layer, &cell_id, &values, source).await
+            }
+            MeasureCmd::List {
+                cell_layer,
+                cell_id,
+                dsn,
+            } => flow_task::measure_list(dsn.as_deref(), &cell_layer, cell_id.as_deref()).await,
+            MeasureCmd::Clear {
+                cell_layer,
+                cell_id,
+                dsn,
+            } => flow_task::measure_clear(dsn.as_deref(), &cell_layer, cell_id.as_deref()).await,
+        },
+        Cmd::Task { cmd } => match cmd {
+            TaskCmd::Create {
+                kind,
+                project,
+                cell_layer,
+                ruleset,
+                draft_layer,
+                name,
+                dsn,
+            } => {
+                if kind != "classify" {
+                    eprintln!(
+                        "kind inválido `{kind}`: nesta fase só existe `task create classify`"
+                    );
+                    return ExitCode::from(2);
+                }
+                flow_task::task_create(
+                    dsn.as_deref(),
+                    &project,
+                    &cell_layer,
+                    ruleset.as_deref(),
+                    draft_layer.as_deref(),
+                    name.as_deref(),
+                )
+                .await
+            }
+            TaskCmd::Run { task, limit, dsn } => {
+                flow_task::task_run(dsn.as_deref(), &task, limit).await
+            }
+            TaskCmd::List { project, dsn } => {
+                flow_task::task_list(dsn.as_deref(), project.as_deref()).await
+            }
+            TaskCmd::Show { task, dsn } => flow_task::task_show(dsn.as_deref(), &task).await,
+            TaskCmd::Cancel { task, dsn } => flow_task::task_cancel(dsn.as_deref(), &task).await,
+            TaskCmd::Retry { task, dsn } => flow_task::task_retry(dsn.as_deref(), &task).await,
+        },
+        Cmd::Process { cmd } => match cmd {
+            ProcessCmd::List { task, status, dsn } => {
+                flow_task::process_list(dsn.as_deref(), &task, status.as_deref()).await
             }
         },
     };

@@ -43,6 +43,11 @@ pub trait RuleSetRepo: Send + Sync {
     async fn update(&self, ruleset: &RuleSet) -> Result<Option<RuleSet>>;
     /// Remove o ruleset (regras caem em cascata).
     async fn delete(&self, id: &str) -> Result<bool>;
+    /// Torna este ruleset o **ativo** do projeto, desativando os demais
+    /// (o índice parcial único da `0013` garante no máximo um ativo).
+    async fn activate(&self, id: &str) -> Result<Option<RuleSet>>;
+    /// O ruleset **ativo** do projeto, se houver (default do `task create`).
+    async fn find_active(&self, project_id: &str) -> Result<Option<RuleSet>>;
 }
 
 /// Alterações **parciais** de uma regra — apenas os campos presentes
@@ -110,6 +115,18 @@ type RuleSetRow = (
     time::OffsetDateTime, // updated_at
 );
 
+/// Contagens do `ruleset delete --force` — as três remoções da transação
+/// única, reportadas ao operador (nada silencioso).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuleSetForceDeleted {
+    /// Células classificadas removidas (`draft_cells` que o ruleset decidiu).
+    pub draft_cells: u64,
+    /// Regras removidas.
+    pub rules: u64,
+    /// `true` se o ruleset foi apagado (`false` = já não existia).
+    pub ruleset: bool,
+}
+
 fn ruleset_from_row(row: RuleSetRow) -> RuleSet {
     RuleSet {
         id: row.0,
@@ -126,6 +143,10 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
     matches!(err, sqlx::Error::Database(db) if db.is_unique_violation())
 }
 
+fn is_foreign_key_violation(err: &sqlx::Error) -> bool {
+    matches!(err, sqlx::Error::Database(db) if db.is_foreign_key_violation())
+}
+
 /// Rulesets sobre [`PgPool`].
 #[derive(Debug, Clone)]
 pub struct PgRuleSetRepo {
@@ -135,6 +156,56 @@ pub struct PgRuleSetRepo {
 impl PgRuleSetRepo {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Pré-checagem do `ruleset delete` sobre `draft_cells`
+    /// (`draft_cells.ruleset_id` é `ON DELETE RESTRICT` na 0013): quantas
+    /// células o ruleset decide em CADA rascunho — `(nome do rascunho,
+    /// células nele)`, ordenado por nome.
+    pub async fn count_drafts_for_ruleset(&self, ruleset_id: &str) -> Result<Vec<(String, i64)>> {
+        check_id(ruleset_id)?;
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT dl.name, count(*) \
+                 FROM draft_cells dc \
+                 JOIN draft_layers dl ON dl.id = dc.draft_layer_id \
+                 WHERE dc.ruleset_id = $1::uuid \
+                 GROUP BY dl.name ORDER BY dl.name",
+        )
+        .bind(ruleset_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Caminho do `ruleset delete --force`: numa **única transação** apaga
+    /// as `draft_cells` que o ruleset decidiu, as regras e o ruleset — e
+    /// devolve AS TRÊS CONTAGENS (ou sai tudo, ou o rollback não deixa sair
+    /// nada).
+    pub async fn delete_force(&self, id: &str) -> Result<RuleSetForceDeleted> {
+        check_id(id)?;
+        let mut tx = self.pool.begin().await?;
+        let draft_cells = sqlx::query("DELETE FROM draft_cells WHERE ruleset_id = $1::uuid")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        let rules = sqlx::query("DELETE FROM rules WHERE ruleset_id = $1::uuid")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        let ruleset = sqlx::query("DELETE FROM rulesets WHERE id = $1::uuid")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+        tx.commit().await?;
+        Ok(RuleSetForceDeleted {
+            draft_cells,
+            rules,
+            ruleset,
+        })
     }
 
     /// Executa o INSERT que calcula `MAX(version)+1` dentro de uma transação
@@ -271,11 +342,70 @@ impl RuleSetRepo for PgRuleSetRepo {
 
     async fn delete(&self, id: &str) -> Result<bool> {
         check_id(id)?;
-        let res = sqlx::query("DELETE FROM rulesets WHERE id = $1::uuid")
+        match sqlx::query("DELETE FROM rulesets WHERE id = $1::uuid")
             .bind(id)
             .execute(&self.pool)
-            .await?;
-        Ok(res.rows_affected() > 0)
+            .await
+        {
+            Ok(res) => Ok(res.rows_affected() > 0),
+            // FK `draft_cells.ruleset_id ON DELETE RESTRICT` (0013): o
+            // rascunho sobrevive ao ruleset — a recusa do banco vira contagem
+            // acionável, não erro cru de SQL.
+            Err(err) if is_foreign_key_violation(&err) => {
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM draft_cells WHERE ruleset_id = $1::uuid",
+                )
+                .bind(id)
+                .fetch_one(&self.pool)
+                .await?;
+                Err(Error::RuleSetInUseByDraftCells {
+                    ruleset_id: id.to_owned(),
+                    count,
+                })
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    async fn activate(&self, id: &str) -> Result<Option<RuleSet>> {
+        check_id(id)?;
+        // Desativa os demais e ativa o escolhido na MESMA transação: o índice
+        // parcial único (`rulesets_one_active_per_project_idx`, 0013) nunca é
+        // desafiado. Task cancelada no meio = rollback dos dois passos.
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE rulesets SET is_active = false \
+             WHERE project_id = (SELECT project_id FROM rulesets WHERE id = $1::uuid) \
+               AND is_active",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        let row: Option<RuleSetRow> = sqlx::query_as(
+            "UPDATE rulesets SET is_active = true, updated_at = now() \
+             WHERE id = $1::uuid \
+             RETURNING id::text, project_id::text, name, version, description, \
+                       created_at, updated_at",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(row.map(ruleset_from_row))
+    }
+
+    async fn find_active(&self, project_id: &str) -> Result<Option<RuleSet>> {
+        check_id(project_id)?;
+        let row: Option<RuleSetRow> = sqlx::query_as(
+            "SELECT id::text, project_id::text, name, version, description, \
+                    created_at, updated_at \
+             FROM rulesets WHERE project_id = $1::uuid AND is_active \
+             ORDER BY version DESC LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(ruleset_from_row))
     }
 }
 
@@ -351,6 +481,19 @@ impl PgRuleRepo {
             });
         }
         Ok(ruleset_project)
+    }
+
+    /// Quantas regras o ruleset tem — a contagem que o `ruleset delete`
+    /// reporta (as regras caem em cascata com o ruleset; a remoção é
+    /// reportada, nunca silenciosa).
+    pub async fn count_for_ruleset(&self, ruleset_id: &str) -> Result<i64> {
+        check_id(ruleset_id)?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM rules WHERE ruleset_id = $1::uuid")
+                .bind(ruleset_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(count)
     }
 }
 

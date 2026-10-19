@@ -178,9 +178,16 @@ banco para a fila de processos escrever sem corruption cruzada.
 - Registro de **scenes** e vínculo com o projeto (`project_scenes`).
 - **Import/Export** de exchange do fluxo.
 
-**Migração:** `0013_scenes`.
+**Migração:** `0014_scenes`.
 **Tabelas:** `scenes`, `project_scenes`.
 **Crates:** `ta-core`, `ta-db`, `ta-gis` (IO), `ta-cli`.
+
+**Registro da revisão da Fase 3 (2026-10-19):** `cell_measures` (criada na
+`0013`) ganhará nesta fase proveniência por cena — coluna `scene_id` NULL
+com FK → `scenes` (medida pode existir sem cena: observação importada a
+dedo). Política de concorrência **last-write-wins** por
+`(cell_layer, cell_id, measure)` documentada na migração — a **PK permanece
+inalterada** (a cena é proveniência da observação, não chave da medida).
 
 **Critérios de aceite**
 - Cadastrar cena e vinculá-la ao projeto; importar/exportar o exchange com round-trip verificado.
@@ -199,6 +206,13 @@ Integração do fluxo completo na interface e consolidação de **área**.
 
 **Crates:** `ta-gis`, `ta-db`, `ta-gui`, `ta-cli`.
 **Depende de:** Fases 3 e 4.
+
+**Registro da revisão da Fase 3 (2026-10-19):** o executor de task hoje mora
+em `ta-cli` (`flow_task::task_run`, lotes transacionais claim → medidas →
+`classify_batch` → draft/log/finish). A GUI precisará dele: **extrair para
+crate próprio** (ex.: `ta-flow`, dependendo de `ta-db` + `ta-engine` +
+`ta-core`) **ANTES** de plugar o banco na GUI (DbCmd) — sem duplicar a
+lógica de fila/retomada em dois lugares.
 
 **Critérios de aceite**
 - Fluxo ponta a ponta executável pela GUI **e** pela CLI, com resultados consistentes.
@@ -235,7 +249,8 @@ Sequência (continua `0001`–`0004` já existentes):
 | `0010_rules` | 2 | `rules`, `rulesets` |
 | `0011_rule_class_restrict` | 2 | FK `rules.class_id` recriada com `ON DELETE RESTRICT` (nada de cascata silenciosa; `class delete --force` é o caminho explícito) |
 | `0012_queue` | 3 | `tasks`, `processes`, `cell_log` |
-| `0013_scenes` | 4 | `scenes`, `project_scenes` |
+| `0013_drafts_measures` | 3 | `draft_cells`, `cell_measures`, `rulesets.is_active` + gatilhos F5 de integridade multi-projeto |
+| `0014_scenes` | 4 | `scenes`, `project_scenes` |
 
 Todas usam **nomes próprios, sem prefixo legado** (Decisão 2). Geometria em **EPSG:4674**; a grade é configurável em **qualquer EPSG** (resolução/origem nas unidades do SRS escolhido) e a **área** usa o SRS de `area_settings.srs_id` (Decisão 4 retificada em 2026-10-18).
 
@@ -275,7 +290,13 @@ semiaberta (`>=` no mínimo, `<` no máximo), nunca essas funções.
 - **Fase 1**: **implementada e revisada** (Themis: aprovada com ressalvas em
   2026-10-18); os achados de fechamento foram aplicados e a fase **aguarda
   commit** (migrações `0005`–`0008`, CLI `phase`/`aoi`/`grid`/`cell`, seed).
-- Fases **2, 3, 4, 5 e 6**: **não iniciadas**.
+- **Fase 2**: **implementada e revisada** (Themis, 2026-10-18); achados
+  aplicados, **aguarda commit** (`0009_classes`, `0010_rules`,
+  `0011_rule_class_restrict`, motor puro de regras).
+- **Fase 3**: **implementada e revisada** (Themis, 2026-10-18/19); achados
+  aplicados, **aguarda commit** (`0012_queue`, `0013_drafts_measures`,
+  fila/classificação na CLI — `measure`/`task`/`process`/`cell log`).
+- Fases **4, 5 e 6**: **não iniciadas**.
 - Dívidas de teste adiadas para o hardening da Fase 6: dedup de helpers de
   teste (n7), n8 e n13.
 - Nada foi commitado por este registro (o usuário faz commits manualmente).
@@ -293,3 +314,11 @@ semiaberta (`>=` no mínimo, `<` no máximo), nunca essas funções.
    outro role, a migração falha com `permission denied` e é preciso
    `GRANT REFERENCES ON spatial_ref_sys TO <app_role>;` (ou criar a extensão
    com o role da aplicação) — ver `INSTALL.md`.
+7. **FK RESTRICT sem caminho de saída (padrão M1, permanente)** — toda FK
+   `ON DELETE RESTRICT` nova deve vir acompanhada de: **pré-checagem** no
+   comando (contagem + nomes), **mensagem acionável** e **caminho de saída
+   explícito** (ex.: apagar o dependente com comando próprio ou repetir com
+   `--force`, que apaga numa única transação com contagens reportadas).
+   Padrão estabelecido no fechamento da Fase 3 (`draft_cells` →
+   `draft delete` / `--force`); delete bloqueado sem dizer "como sair" é
+   falha de operação, não rigor.
