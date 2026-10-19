@@ -3,6 +3,12 @@ name: release
 # Release Curupira GIS — disparada por tag `v*` (convenção: tag == versão do
 # workspace, ex.: v0.1.0 == Cargo.toml [workspace.package] version).
 #
+# GATE DE VERSÃO (2026-10-19, @prometheus): a tag precisa bater com
+# [workspace.package] version do Cargo.toml; o job `verify-version` roda
+# ANTES de qualquer build e falha com mensagem explícita se divergir. Sem
+# ele, o instalador Windows (versão vinda da TAG) e o .deb (versão vinda do
+# Cargo.toml) podiam sair com versões diferentes — sem erro em nenhum job.
+#
 # DECISÃO DE PACKAGING (2026-10-16, documentada no README "Releases"):
 # workflow MANUAL com matrix build em vez de cargo-dist. Motivos: (a) o CI do
 # cargo-dist é gerado por `dist init`, que não pode ser produzido nem
@@ -38,8 +44,84 @@ env:
 #   mamba-org/setup-micromamba@v1 (objeto da tag v1 em 2026-10-17; job macOS)
 
 jobs:
+  # GATE DE VERSÃO: a tag precisa bater com [workspace.package] version do
+  # Cargo.toml. Único job sem toolchain Rust (grep/sed/awk puros) — o gate
+  # não pode depender de `cargo metadata`.
+  verify-version:
+    name: Verifica tag == versão do workspace
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Compara tag com [workspace.package] version do Cargo.toml
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest="Cargo.toml"
+          tag="${GITHUB_REF_NAME}"
+
+          # Versão do workspace: extrai APENAS a chave `version` da seção
+          # [workspace.package] do Cargo.toml da raiz (o awk percorre as
+          # seções; `version` de [package]/[dependencies] é ignorado).
+          manifest_version="$(
+            awk '
+              /^[[:space:]]*\[/ {
+                sec = $0
+                sub(/[[:space:]]*#.*$/, "", sec)
+                sub(/^[[:space:]]*\[/, "", sec)
+                sub(/\][[:space:]]*$/, "", sec)
+                gsub(/[[:space:]]/, "", sec)
+                next
+              }
+              sec == "workspace.package" && $0 ~ /^[[:space:]]*version[[:space:]]*=/ {
+                v = $0
+                sub(/^[^=]*=[[:space:]]*/, "", v)
+                sub(/[[:space:]]*#.*$/, "", v)
+                gsub(/[^0-9A-Za-z.+-]/, "", v)
+                print v
+                exit
+              }
+            ' "$manifest" || true
+          )"
+
+          if [ -z "$manifest_version" ]; then
+            echo "::error::não consegui extrair [workspace.package] version de $manifest — a chave 'version' existe nessa seção?"
+            exit 1
+          fi
+
+          case "$tag" in
+            v*) tag_version="${tag#v}" ;;
+            *)
+              echo "::error::tag inesperado: '$tag' (esperado 'v<versão>', ex.: v0.1.0)"
+              exit 1
+              ;;
+          esac
+
+          # Núcleo numérico da tag (0.1.0 de 0.1.0-rc.1) + sufixo restante.
+          tag_core="${tag_version%%[-+]*}"
+          tag_suffix="${tag_version#"$tag_core"}"
+          suffix_body="${tag_suffix#-}"
+
+          echo "tag: $tag | versão do workspace ([workspace.package] version): $manifest_version"
+
+          if [ "$tag_version" = "$manifest_version" ]; then
+            echo "OK: a tag $tag bate exatamente com a versão do workspace $manifest_version"
+          elif [ "$tag_core" = "$manifest_version" ] && [ -n "$suffix_body" ] && [ "$suffix_body" != "$tag_suffix" ]; then
+            # Sufixo '-<algo>' não vazio => pré-release da versão atual
+            # (v0.1.0-rc.1 para a versão 0.1.0). Aceito: instalador e .deb
+            # já reportam 0.1.0 (o .deb vem do Cargo.toml).
+            echo "OK: a tag $tag é pré-release ($tag_suffix) da versão do workspace $manifest_version"
+          else
+            echo "::error::tag $tag ≠ versão do workspace $manifest_version — atualize [workspace.package] version no Cargo.toml antes de taguear"
+            exit 1
+          fi
+
   build-linux:
     name: linux x86_64-gnu (tar.gz)
+    needs: [verify-version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -101,6 +183,7 @@ jobs:
 
   build-windows:
     name: windows x86_64-msvc (zip com GDAL embutida)
+    needs: [verify-version]
     runs-on: windows-latest
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
@@ -335,6 +418,7 @@ jobs:
 
   build-macos:
     name: macos arm64 (CurupiraGIS.app zip, GDAL 3.12 conda-forge)
+    needs: [verify-version]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -435,6 +519,7 @@ jobs:
 
   sbom:
     name: SBOM CycloneDX (workspace)
+    needs: [verify-version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0

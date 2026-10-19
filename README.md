@@ -267,5 +267,9 @@ Do código-fonte: **[INSTALL.md](INSTALL.md)**. Binários de release (Linux
 assinado) em [Releases](https://github.com/ils15/curupira-gis/releases) —
 publicados como **draft** até revisão humana.
 
+Regra de tagueamento: a tag precisa bater com `[workspace.package] version`
+do `Cargo.toml` (ex.: `v0.1.0` == versão `0.1.0`); o workflow de release
+**falha** se não bater.
+
 Licença dual **MIT OR Apache-2.0** (`LICENSE-MIT`, `LICENSE-APACHE`).
 Checkpoints de engenharia em `.pantheon/deepwork/terraamazon-cleanroom-rust/`.

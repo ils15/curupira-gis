@@ -157,6 +157,10 @@ Não há `DATABASE_URL` em tempo de compilação: as migrações são embutidas.
 build de release **não** conecta ao banco; a conexão é escolhida em runtime
 (diálogo da GUI ou `--dsn`/`TA_PG_DSN`).
 
+Publicação: a tag de release precisa bater com `[workspace.package] version`
+do `Cargo.toml` (ex.: `v0.1.0` == versão `0.1.0`); o workflow de release
+**falha** se não bater.
+
 ## 6. Troubleshooting
 
 | Sintoma | Causa / solução |
