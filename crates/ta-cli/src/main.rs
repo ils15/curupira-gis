@@ -28,6 +28,8 @@ use ta_db::pool::{self, DbConfig};
 mod doctor;
 mod dsn;
 mod flow;
+mod flow_exchange;
+mod flow_scene;
 mod flow_task;
 mod import;
 mod migrate;
@@ -256,6 +258,133 @@ enum Cmd {
     Process {
         #[command(subcommand)]
         cmd: ProcessCmd,
+    },
+    /// Cenas de sensoriamento — add/list/link/unlink/remove (Fase 4).
+    Scene {
+        #[command(subcommand)]
+        cmd: SceneCmd,
+    },
+    /// Exchange do fluxo de monitoramento — export/import (Fase 4).
+    Exchange {
+        #[command(subcommand)]
+        cmd: ExchangeCmd,
+    },
+    /// Projetos — deleção completa com relatório (Fase 4).
+    Project {
+        #[command(subcommand)]
+        cmd: ProjectCmd,
+    },
+}
+
+/// Subcomandos de `project`.
+#[derive(Debug, Subcommand)]
+enum ProjectCmd {
+    /// Apaga o projeto INTEIRO (DESTRUTIVO): deleção ordenada em transação
+    /// única com relatório de contagens por tabela; sem --yes mostra o
+    /// resumo do que seria apagado e recusa. Cenas globais permanecem.
+    Delete {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Confirma a remoção.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+}
+
+/// Subcomandos de `scene`.
+#[derive(Debug, Subcommand)]
+enum SceneCmd {
+    /// Registra uma cena (global; nome é único no banco).
+    Add {
+        /// Nome da cena (ex.: `S2A_2026-01-31`).
+        #[arg(long)]
+        name: String,
+        /// Aquisição em ISO-8601 (`2026-01-31` ou `2026-01-31T12:00:00Z`).
+        #[arg(long)]
+        acquisition: Option<String>,
+        /// Footprint: WKT (POLYGON/MULTIPOLYGON em EPSG:4674) ou
+        /// arquivo .wkt/.geojson.
+        #[arg(long)]
+        footprint: Option<String>,
+        /// Metadados livres como objeto JSON (`'{"satellite":"S2"}'`).
+        #[arg(long)]
+        metadata: Option<String>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Lista cenas — todas, ou só as de um projeto (--project).
+    List {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Vincula a cena ao projeto (idempotente).
+    Link {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Nome da cena.
+        #[arg(long)]
+        scene: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Desvincula a cena do projeto (a cena continua existindo).
+    Unlink {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Nome da cena.
+        #[arg(long)]
+        scene: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Apaga a cena (DESTRUTIVO; vínculos caem, medidas perdem a proveniência
+    /// mas permanecem) — sem --yes mostra as contagens e recusa.
+    Remove {
+        /// Nome da cena.
+        #[arg(long)]
+        name: String,
+        /// Confirma a remoção.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+}
+
+/// Subcomandos de `exchange`.
+#[derive(Debug, Subcommand)]
+enum ExchangeCmd {
+    /// Exporta TODAS as seções do projeto para um exchange
+    /// `curupira-monitoring-exchange v1` (JSON pretty).
+    Export {
+        /// Projeto alvo: id (UUID) ou nome.
+        #[arg(long)]
+        project: String,
+        /// Arquivo de saída (JSON; sobrescreve).
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
+    /// Importa um exchange criando um projeto NOVO (recusa nome existente —
+    /// sem merge nesta fase).
+    Import {
+        /// Arquivo do exchange (JSON).
+        #[arg(long = "in", visible_alias = "input")]
+        input: PathBuf,
+        /// Nome do projeto NOVO a criar.
+        #[arg(long)]
+        into: String,
+        #[arg(long)]
+        dsn: Option<String>,
     },
 }
 
@@ -753,6 +882,9 @@ enum MeasureCmd {
         /// Proveniência livre (ex.: cena/índice de origem).
         #[arg(long)]
         source: Option<String>,
+        /// Cena de origem (por NOME; gravada como proveniência na medida).
+        #[arg(long)]
+        scene: Option<String>,
         #[arg(long)]
         dsn: Option<String>,
     },
@@ -1220,9 +1352,18 @@ async fn main() -> ExitCode {
                 cell_id,
                 values,
                 source,
+                scene,
                 dsn,
             } => {
-                flow_task::measure_set(dsn.as_deref(), &cell_layer, &cell_id, &values, source).await
+                flow_task::measure_set(
+                    dsn.as_deref(),
+                    &cell_layer,
+                    &cell_id,
+                    &values,
+                    source,
+                    scene.as_deref(),
+                )
+                .await
             }
             MeasureCmd::List {
                 cell_layer,
@@ -1274,6 +1415,46 @@ async fn main() -> ExitCode {
         Cmd::Process { cmd } => match cmd {
             ProcessCmd::List { task, status, dsn } => {
                 flow_task::process_list(dsn.as_deref(), &task, status.as_deref()).await
+            }
+        },
+        Cmd::Scene { cmd } => match cmd {
+            SceneCmd::Add {
+                name,
+                acquisition,
+                footprint,
+                metadata,
+                dsn,
+            } => {
+                flow_scene::scene_add(dsn.as_deref(), &name, acquisition, footprint, metadata).await
+            }
+            SceneCmd::List { project, dsn } => {
+                flow_scene::scene_list(dsn.as_deref(), project).await
+            }
+            SceneCmd::Link {
+                project,
+                scene,
+                dsn,
+            } => flow_scene::scene_link(dsn.as_deref(), &project, &scene).await,
+            SceneCmd::Unlink {
+                project,
+                scene,
+                dsn,
+            } => flow_scene::scene_unlink(dsn.as_deref(), &project, &scene).await,
+            SceneCmd::Remove { name, yes, dsn } => {
+                flow_scene::scene_remove(dsn.as_deref(), &name, yes).await
+            }
+        },
+        Cmd::Exchange { cmd } => match cmd {
+            ExchangeCmd::Export { project, out, dsn } => {
+                flow_exchange::exchange_export(dsn.as_deref(), &project, &out).await
+            }
+            ExchangeCmd::Import { input, into, dsn } => {
+                flow_exchange::exchange_import(dsn.as_deref(), &input, &into).await
+            }
+        },
+        Cmd::Project { cmd } => match cmd {
+            ProjectCmd::Delete { project, yes, dsn } => {
+                flow::project_delete(dsn.as_deref(), &project, yes).await
             }
         },
     };

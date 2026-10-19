@@ -67,6 +67,30 @@ impl PgAoiLayerRepo {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
+
+    /// `create` sobre o **executor** dado (pool ou transação) — o import do
+    /// exchange grava camada+features+AOI numa única transação.
+    pub async fn create_on<'e, E>(exec: E, aoi: &AoiLayer) -> Result<AoiLayer>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        check_id(&aoi.project_id)?;
+        check_id(&aoi.layer_id)?;
+        let row: AoiRow = sqlx::query_as(
+            "INSERT INTO aoi_layers (id, project_id, layer_id, aoi_id_column, phase_id) \
+             VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2::uuid, $3::uuid, $4, $5::uuid) \
+             RETURNING id::text, project_id::text, layer_id::text, aoi_id_column, phase_id::text, \
+                       created_at, updated_at",
+        )
+        .bind(&aoi.id)
+        .bind(&aoi.project_id)
+        .bind(&aoi.layer_id)
+        .bind(&aoi.aoi_id_column)
+        .bind(&aoi.phase_id)
+        .fetch_one(exec)
+        .await?;
+        Ok(aoi_from_row(row))
+    }
 }
 
 #[async_trait]

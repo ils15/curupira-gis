@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use sqlx::PgPool;
-use ta_core::classification::{Class, ClassGroup, DraftLayer, DraftState};
+use ta_core::classification::{Class, ClassGroup, DraftCell, DraftLayer, DraftState};
 
 use crate::error::check_id;
 use crate::{Error, Result};
@@ -115,6 +115,27 @@ impl PgClassGroupRepo {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
+
+    /// `create` sobre o **executor** dado (pool ou transação) — o import do
+    /// exchange grava grupos e classes na mesma transação.
+    pub async fn create_on<'e, E>(exec: E, group: &ClassGroup) -> Result<ClassGroup>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        check_id(&group.project_id)?;
+        let row: GroupRow = sqlx::query_as(
+            "INSERT INTO class_groups (id, project_id, name, sort_order) \
+             VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2::uuid, $3, $4) \
+             RETURNING id::text, project_id::text, name, sort_order, created_at, updated_at",
+        )
+        .bind(&group.id)
+        .bind(&group.project_id)
+        .bind(&group.name)
+        .bind(group.sort_order)
+        .fetch_one(exec)
+        .await?;
+        Ok(group_from_row(row))
+    }
 }
 
 #[async_trait]
@@ -193,6 +214,37 @@ pub struct PgClassRepo {
 impl PgClassRepo {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// `create` sobre o **executor** dado (pool ou transação), SEM a checagem
+    /// de ciclo — caminho do import do exchange, que resolve `parent_name`
+    /// em ordem topológica (ciclo no documento é erro ANTES do banco).
+    pub async fn create_on<'e, E>(exec: E, class: &Class) -> Result<Class>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        check_id(&class.project_id)?;
+        check_optional_id(class.class_group_id.as_ref())?;
+        check_optional_id(class.parent_id.as_ref())?;
+        let row: ClassRow = sqlx::query_as(
+            "INSERT INTO classes (id, project_id, class_group_id, parent_id, name, color, \
+                                 sort_order, is_active) \
+             VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2::uuid, $3::uuid, \
+                     $4::uuid, $5, $6, $7, $8) \
+             RETURNING id::text, project_id::text, class_group_id::text, parent_id::text, \
+                       name, color, sort_order, is_active, created_at, updated_at",
+        )
+        .bind(&class.id)
+        .bind(&class.project_id)
+        .bind(&class.class_group_id)
+        .bind(&class.parent_id)
+        .bind(&class.name)
+        .bind(&class.color)
+        .bind(class.sort_order)
+        .bind(class.is_active)
+        .fetch_one(exec)
+        .await?;
+        Ok(class_from_row(row))
     }
 
     /// Sobe a cadeia de mães a partir de `parent_id` e devolve erro se
@@ -482,6 +534,64 @@ pub struct PgDraftLayerRepo {
 impl PgDraftLayerRepo {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// `create` sobre o **executor** dado (pool ou transação) — o import do
+    /// exchange grava rascunhos e decisões na mesma transação.
+    pub async fn create_on<'e, E>(exec: E, layer: &DraftLayer) -> Result<DraftLayer>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        check_id(&layer.project_id)?;
+        check_optional_id(layer.phase_id.as_ref())?;
+        check_optional_id(layer.cell_layer_id.as_ref())?;
+        let row: DraftRow = sqlx::query_as(
+            "INSERT INTO draft_layers (id, project_id, phase_id, cell_layer_id, name, state) \
+             VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2::uuid, $3::uuid, \
+                     $4::uuid, $5, $6) \
+             RETURNING id::text, project_id::text, phase_id::text, cell_layer_id::text, name, \
+                       state, created_at, updated_at",
+        )
+        .bind(&layer.id)
+        .bind(&layer.project_id)
+        .bind(&layer.phase_id)
+        .bind(&layer.cell_layer_id)
+        .bind(&layer.name)
+        .bind(layer.state.as_str())
+        .fetch_one(exec)
+        .await?;
+        draft_from_row(row)
+    }
+
+    /// Decisões do rascunho (`draft_cells`), ordenadas por grade/célula —
+    /// leitura do export do exchange.
+    pub async fn list_cells(&self, draft_layer_id: &str) -> Result<Vec<DraftCell>> {
+        check_id(draft_layer_id)?;
+        let rows: Vec<(String, String, String, String, String, time::OffsetDateTime)> =
+            sqlx::query_as(
+                "SELECT draft_layer_id::text, cell_layer_id::text, cell_id, \
+                        class_id::text, ruleset_id::text, decided_on \
+                 FROM draft_cells WHERE draft_layer_id = $1::uuid \
+                 ORDER BY cell_layer_id, cell_id",
+            )
+            .bind(draft_layer_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(draft_layer_id, cell_layer_id, cell_id, class_id, ruleset_id, decided_on)| {
+                    DraftCell {
+                        draft_layer_id,
+                        cell_layer_id,
+                        cell_id,
+                        class_id,
+                        ruleset_id,
+                        decided_on,
+                    }
+                },
+            )
+            .collect())
     }
 
     /// Busca por id (`None` = ausente) — pré-voo do `task run`: o rascunho

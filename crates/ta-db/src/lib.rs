@@ -25,6 +25,7 @@ pub mod repo_cell;
 pub mod repo_class;
 pub mod repo_phase;
 pub mod repo_ruleset;
+pub mod repo_scene;
 pub mod repo_task;
 pub mod spatial;
 

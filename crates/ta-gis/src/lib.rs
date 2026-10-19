@@ -17,6 +17,7 @@
 pub mod derived;
 pub mod detect;
 pub mod error;
+pub mod exchange;
 pub mod normalizer;
 pub mod reader;
 pub mod writer;

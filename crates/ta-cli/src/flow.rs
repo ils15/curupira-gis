@@ -13,7 +13,7 @@ use ta_core::classification::{Class, ClassGroup, DraftLayer};
 use ta_core::feature::Feature;
 use ta_core::phase::Phase;
 use ta_core::rule::{Rule, RuleSet};
-use ta_db::repo::{FeatureRepo, LayerRepo, PgFeatureRepo, PgLayerRepo, PgProjectRepo};
+use ta_db::repo::{FeatureRepo, LayerRepo, PgFeatureRepo, PgLayerRepo, PgProjectRepo, ProjectRepo};
 use ta_db::repo_aoi::{AoiLayerRepo, PgAoiLayerRepo};
 use ta_db::repo_cell::{
     BlockedCellRepo, CellLayerRepo, CellRepo, PgBlockedCellRepo, PgCellLayerRepo, PgCellRepo,
@@ -1489,4 +1489,76 @@ fn rule_create_error(err: &ta_db::Error, name: &str, class: &str) -> String {
         }
     }
     format!("criar regra `{name}` para a classe `{class}`: {err}")
+}
+
+/// `project delete` — apaga o projeto INTEIRO: deleção ORDENADA em UMA
+/// transação (decisões → regras → rulesets → fila → medidas → células →
+/// grades → rascunhos → camadas → AOI → vínculos de cena → classes → grupos
+/// → fases → projeto), respeitando as FK `ON DELETE RESTRICT` SEM desativar
+/// triggers, com RELATÓRIO de contagens por tabela. Cenas (`scenes`) são
+/// globais: sai só o vínculo do projeto, a cena permanece.
+///
+/// Sem `--yes`: mostra o resumo do que seria apagado (contagens) e RECUSA.
+pub async fn project_delete(dsn: Option<&str>, project: &str, yes: bool) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let repo = PgProjectRepo::new(pool.clone());
+    // Deleção NÃO auto-cria projeto (diferente do `resolve_project` dos
+    // comandos de escrita): resolve só EXISTENTE, por id (UUID) ou nome.
+    let proj = {
+        let mut found: Option<ta_core::project::Project> = None;
+        if project.len() == 36 && project.as_bytes()[8] == b'-' {
+            found = repo.get(project).await.map_err(|e| e.to_string())?;
+        }
+        if found.is_none() {
+            found = repo
+                .list()
+                .await
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|p| p.name == project);
+        }
+        found.ok_or_else(|| {
+            format!("projeto `{project}` não existe; liste com `ta-cli list-layers`")
+        })?
+    };
+    if !yes {
+        let report = repo
+            .delete_preview(&proj.id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("projeto `{}` sumiu durante o preview", proj.name))?;
+        let resumo = report
+            .entries()
+            .iter()
+            .map(|(tabela, n)| format!("{tabela}={n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        pool.close().await;
+        return Err(format!(
+            "recusado sem --yes: apagar o projeto `{}` remove {} linha(s): \
+             {resumo}; cenas globais PERMANECEM (sai só o vínculo do projeto). \
+             Repita com --yes para confirmar",
+            proj.name,
+            report.total()
+        ));
+    }
+    let report = repo
+        .delete_ordered(&proj.id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("projeto `{}` não existe mais", proj.name))?;
+    println!(
+        "projeto apagado: {} ({})\ntotal={}\n{}",
+        proj.name,
+        proj.id,
+        report.total(),
+        report
+            .entries()
+            .iter()
+            .map(|(tabela, n)| format!("{tabela}={n}"))
+            .collect::<Vec<_>>()
+            .join("\t")
+    );
+    pool.close().await;
+    Ok(())
 }

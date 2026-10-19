@@ -296,7 +296,19 @@ semiaberta (`>=` no mínimo, `<` no máximo), nunca essas funções.
 - **Fase 3**: **implementada e revisada** (Themis, 2026-10-18/19); achados
   aplicados, **aguarda commit** (`0012_queue`, `0013_drafts_measures`,
   fila/classificação na CLI — `measure`/`task`/`process`/`cell log`).
-- Fases **4, 5 e 6**: **não iniciadas**.
+- **Fase 4**: **implementada e revisada** (2026-10-19; `0014_scenes`,
+  `ta-gis::exchange` dono do formato
+  `curupira-monitoring-exchange v1`, `exchange export/import`, `scene
+  add/list/link/unlink/remove`, `measure set --scene`; round-trip E2E
+  verificado com contagens, igualdade geométrica e mesma decisão de
+  `rule eval`). **Achados da revisão aplicados** (ver STATUS.md, seção
+  "Fechamento da Fase 4"): import ATÔMICO em transação única (falha não
+  deixa projeto parcial; retry funciona), `project delete --yes` com
+  deleção ordenada e relatório de contagens por tabela (cena global
+  sobrevive), aviso de cena reaproveitada com footprint/metadata
+  divergentes, `float_roundtrip` no serde_json, mensagens de ciclo de
+  classe e de footprint não-poligonal repaginadas. **Aguarda commit**.
+- Fases **5 e 6**: **não iniciadas**.
 - Dívidas de teste adiadas para o hardening da Fase 6: dedup de helpers de
   teste (n7), n8 e n13.
 - Nada foi commitado por este registro (o usuário faz commits manualmente).
@@ -321,4 +333,9 @@ semiaberta (`>=` no mínimo, `<` no máximo), nunca essas funções.
    `--force`, que apaga numa única transação com contagens reportadas).
    Padrão estabelecido no fechamento da Fase 3 (`draft_cells` →
    `draft delete` / `--force`); delete bloqueado sem dizer "como sair" é
-   falha de operação, não rigor.
+   falha de operação, não rigor. **Reafirmado no fechamento da Fase 4
+   (2026-10-19):** o mesmo padrão vale na ESCALA do projeto inteiro —
+   `project delete --yes` (deleção ordenada em transação única, respeitando
+   RESTRICT sem desativar trigger, com relatório de contagens) é o caminho
+   de saída canônico do import falho e de qualquer projeto rico; a
+   pré-checagem sem `--yes` mostra as contagens por tabela antes de decidir.

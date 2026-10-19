@@ -61,6 +61,30 @@ impl PgPhaseRepo {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
+
+    /// `create` sobre o **executor** dado (pool ou transação) — o import do
+    /// exchange grava a seção de fases numa única transação.
+    pub async fn create_on<'e, E>(exec: E, phase: &Phase) -> Result<Phase>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        check_id(&phase.project_id)?;
+        let row: PhaseRow = sqlx::query_as(
+            "INSERT INTO phases (id, project_id, name, description, cell_blocker, sort_order) \
+             VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2::uuid, $3, $4, $5, $6) \
+             RETURNING id::text, project_id::text, name, description, cell_blocker, \
+                       sort_order, created_at, updated_at",
+        )
+        .bind(&phase.id)
+        .bind(&phase.project_id)
+        .bind(&phase.name)
+        .bind(&phase.description)
+        .bind(phase.cell_blocker)
+        .bind(phase.sort_order)
+        .fetch_one(exec)
+        .await?;
+        Ok(phase_from_row(row))
+    }
 }
 
 #[async_trait]

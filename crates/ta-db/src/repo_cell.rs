@@ -286,6 +286,70 @@ impl PgCellRepo {
         }
         Ok(total)
     }
+
+    /// Import do exchange: células que JÁ estão no armazenamento canônico
+    /// (WKT 4674 do documento) — grava direto, SEM `ST_Transform` (o `srid`
+    /// da grade define unidades de resolução/origem, não o SRS destas
+    /// geometrias). `ON CONFLICT DO NOTHING` como o `bulk_insert`.
+    pub async fn import_cells_4674_on(
+        conn: &mut PgConnection,
+        cell_layer_id: &str,
+        cells: &[Cell],
+    ) -> Result<u64> {
+        const CHUNK: usize = 500;
+        if cells.is_empty() {
+            return Ok(0);
+        }
+        check_id(cell_layer_id)?;
+        let mut ids = Vec::with_capacity(cells.len());
+        let mut geoms = Vec::with_capacity(cells.len());
+        let mut rows_idx = Vec::with_capacity(cells.len());
+        let mut cols_idx = Vec::with_capacity(cells.len());
+        for cell in cells {
+            let ewkb = geo::to_ewkb(&Geometry::Polygon(cell.geom.clone()), TARGET_SRID)?;
+            ids.push(cell.cell_id.clone());
+            geoms.push(bytes_to_hex(&ewkb));
+            rows_idx.push(cell.row_index);
+            cols_idx.push(cell.col_index);
+        }
+        let mut total = 0u64;
+        for start in (0..cells.len()).step_by(CHUNK) {
+            let end = (start + CHUNK).min(cells.len());
+            let res = sqlx::query(
+                "INSERT INTO cells (cell_layer_id, cell_id, geom, row_index, col_index) \
+                 SELECT $1::uuid, x.cid, x.g::geometry, x.r, x.c \
+                 FROM UNNEST($2::text[], $3::text[], $4::int4[], $5::int4[]) AS x(cid, g, r, c) \
+                 ON CONFLICT (cell_layer_id, cell_id) DO NOTHING",
+            )
+            .bind(cell_layer_id)
+            .bind(&ids[start..end])
+            .bind(&geoms[start..end])
+            .bind(&rows_idx[start..end])
+            .bind(&cols_idx[start..end])
+            .execute(&mut *conn)
+            .await?;
+            total += res.rows_affected();
+        }
+        Ok(total)
+    }
+
+    /// `exists` sobre o **executor** dado (pool ou transação) — o import do
+    /// exchange valida a célula DENTRO da transação única (a célula gravada
+    /// na seção `cell_layers` ainda não está visível fora dela).
+    pub async fn exists_on<'e, E>(exec: E, cell_layer_id: &str, cell_id: &str) -> Result<bool>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        check_id(cell_layer_id)?;
+        let found: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM cells WHERE cell_layer_id = $1::uuid AND cell_id = $2)",
+        )
+        .bind(cell_layer_id)
+        .bind(cell_id)
+        .fetch_one(exec)
+        .await?;
+        Ok(found)
+    }
 }
 
 #[async_trait]
@@ -356,15 +420,7 @@ impl CellRepo for PgCellRepo {
     }
 
     async fn exists(&self, cell_layer_id: &str, cell_id: &str) -> Result<bool> {
-        check_id(cell_layer_id)?;
-        let found: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM cells WHERE cell_layer_id = $1::uuid AND cell_id = $2)",
-        )
-        .bind(cell_layer_id)
-        .bind(cell_id)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(found)
+        Self::exists_on(&self.pool, cell_layer_id, cell_id).await
     }
 
     async fn extent(&self, cell_layer_id: &str) -> Result<Option<[f64; 4]>> {
@@ -390,6 +446,34 @@ pub struct PgBlockedCellRepo {
 impl PgBlockedCellRepo {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// `block` sobre o **executor** dado (pool ou transação) — o import do
+    /// exchange grava a seção de bloqueios na transação da grade.
+    pub async fn block_on<'e, E>(exec: E, blocked: &BlockedCell) -> Result<BlockedCell>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        check_id(&blocked.cell_layer_id)?;
+        let row: (i64, String, String, Option<String>, time::OffsetDateTime) = sqlx::query_as(
+            "INSERT INTO blocked_cells (cell_layer_id, cell_id, reason) \
+             VALUES ($1::uuid, $2, $3) \
+             ON CONFLICT (cell_layer_id, cell_id) DO UPDATE \
+                 SET reason = EXCLUDED.reason, updated_at = now() \
+             RETURNING id, cell_layer_id::text, cell_id, reason, created_at",
+        )
+        .bind(&blocked.cell_layer_id)
+        .bind(&blocked.cell_id)
+        .bind(&blocked.reason)
+        .fetch_one(exec)
+        .await?;
+        Ok(BlockedCell {
+            id: row.0,
+            cell_layer_id: row.1,
+            cell_id: row.2,
+            reason: row.3,
+            created_at: row.4,
+        })
     }
 }
 

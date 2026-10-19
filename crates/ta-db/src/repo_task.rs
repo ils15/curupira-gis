@@ -66,6 +66,17 @@ pub struct ClaimedProcess {
     pub attempts: i32,
 }
 
+/// Linha de `cell_measures` na ordem dos SELECTs — decodificada uma vez.
+type MeasureRow = (
+    String,               // cell_layer_id
+    String,               // cell_id
+    String,               // measure
+    f64,                  // value
+    Option<String>,       // source
+    Option<String>,       // scene_id
+    time::OffsetDateTime, // updated_on
+);
+
 type TaskRow = (
     String,               // id
     String,               // project_id
@@ -456,6 +467,58 @@ impl PgTaskRepo {
         Ok(res.rows_affected())
     }
 
+    /// Import do exchange: decisões com proveniência POR LINHA (ruleset e
+    /// `decided_on` vêm do documento) — **upsert** como [`Self::draft_upsert_on`].
+    pub async fn import_draft_cells_on<'e, E>(
+        exec: E,
+        draft_layer_id: &str,
+        rows: &[ta_core::classification::DraftCell],
+    ) -> Result<u64>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        check_id(draft_layer_id)?;
+        let mut layers = Vec::with_capacity(rows.len());
+        let mut cells = Vec::with_capacity(rows.len());
+        let mut classes = Vec::with_capacity(rows.len());
+        let mut rulesets = Vec::with_capacity(rows.len());
+        let mut decided = Vec::with_capacity(rows.len());
+        for row in rows {
+            check_id(&row.cell_layer_id)?;
+            check_id(&row.class_id)?;
+            check_id(&row.ruleset_id)?;
+            layers.push(row.cell_layer_id.clone());
+            cells.push(row.cell_id.clone());
+            classes.push(row.class_id.clone());
+            rulesets.push(row.ruleset_id.clone());
+            decided.push(row.decided_on);
+        }
+        let res = sqlx::query(
+            "INSERT INTO draft_cells \
+                 (draft_layer_id, cell_layer_id, cell_id, class_id, ruleset_id, decided_on) \
+             SELECT $1::uuid, u.layer, u.cell, u.class, u.ruleset, \
+                    COALESCE(u.decided, now()) \
+             FROM UNNEST($2::uuid[], $3::text[], $4::uuid[], $5::uuid[], $6::timestamptz[]) \
+                  AS u(layer, cell, class, ruleset, decided) \
+             ON CONFLICT (draft_layer_id, cell_layer_id, cell_id) \
+             DO UPDATE SET class_id = EXCLUDED.class_id, \
+                           ruleset_id = EXCLUDED.ruleset_id, \
+                           decided_on = COALESCE(EXCLUDED.decided_on, now())",
+        )
+        .bind(draft_layer_id)
+        .bind(&layers)
+        .bind(&cells)
+        .bind(&classes)
+        .bind(&rulesets)
+        .bind(&decided)
+        .execute(exec)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     /// Grava as decisões de classificação do lote no rascunho — **upsert**:
     /// reclassificar a mesma célula no MESMO rascunho não duplica. Toda linha
     /// recebe o `ruleset_id` de proveniência e `decided_on = now()`.
@@ -517,8 +580,12 @@ impl PgTaskRepo {
         let mut names = Vec::with_capacity(measures.len());
         let mut values = Vec::with_capacity(measures.len());
         let mut sources = Vec::with_capacity(measures.len());
+        let mut scenes = Vec::with_capacity(measures.len());
         for measure in measures {
             check_id(&measure.cell_layer_id)?;
+            if let Some(scene_id) = &measure.scene_id {
+                check_id(scene_id)?;
+            }
             if !measure.value.is_finite() {
                 return Err(Error::NonFiniteMeasure {
                     measure: measure.measure.clone(),
@@ -530,21 +597,24 @@ impl PgTaskRepo {
             names.push(measure.measure.clone());
             values.push(measure.value);
             sources.push(measure.source.clone());
+            scenes.push(measure.scene_id.clone());
         }
         let res = sqlx::query(
-            "INSERT INTO cell_measures (cell_layer_id, cell_id, measure, value, source) \
-             SELECT u.layer, u.cell, u.measure, u.value, u.source \
-             FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::float8[], $5::text[]) \
-                  AS u(layer, cell, measure, value, source) \
+            "INSERT INTO cell_measures (cell_layer_id, cell_id, measure, value, source, scene_id) \
+             SELECT u.layer, u.cell, u.measure, u.value, u.source, u.scene \
+             FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::float8[], $5::text[], \
+                         $6::uuid[]) \
+                  AS u(layer, cell, measure, value, source, scene) \
              ON CONFLICT (cell_layer_id, cell_id, measure) \
              DO UPDATE SET value = EXCLUDED.value, source = EXCLUDED.source, \
-                           updated_on = now()",
+                           scene_id = EXCLUDED.scene_id, updated_on = now()",
         )
         .bind(&layers)
         .bind(&cells)
         .bind(&names)
         .bind(&values)
         .bind(&sources)
+        .bind(&scenes)
         .execute(exec)
         .await?;
         Ok(res.rows_affected())
@@ -558,15 +628,9 @@ impl PgTaskRepo {
         cell_id: Option<&str>,
     ) -> Result<Vec<CellMeasure>> {
         check_id(cell_layer_id)?;
-        let rows: Vec<(
-            String,
-            String,
-            String,
-            f64,
-            Option<String>,
-            time::OffsetDateTime,
-        )> = sqlx::query_as(
-            "SELECT cell_layer_id::text, cell_id, measure, value, source, updated_on \
+        let rows: Vec<MeasureRow> = sqlx::query_as(
+            "SELECT cell_layer_id::text, cell_id, measure, value, source, scene_id::text, \
+                    updated_on \
                  FROM cell_measures \
                  WHERE cell_layer_id = $1::uuid AND ($2::text IS NULL OR cell_id = $2) \
                  ORDER BY cell_id, measure",
@@ -578,13 +642,16 @@ impl PgTaskRepo {
         Ok(rows
             .into_iter()
             .map(
-                |(cell_layer_id, cell_id, measure, value, source, updated_on)| CellMeasure {
-                    cell_layer_id,
-                    cell_id,
-                    measure,
-                    value,
-                    source,
-                    updated_on,
+                |(cell_layer_id, cell_id, measure, value, source, scene_id, updated_on)| {
+                    CellMeasure {
+                        cell_layer_id,
+                        cell_id,
+                        measure,
+                        value,
+                        source,
+                        scene_id,
+                        updated_on,
+                    }
                 },
             )
             .collect())

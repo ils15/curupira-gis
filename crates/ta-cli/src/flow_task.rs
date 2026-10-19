@@ -28,6 +28,7 @@ use ta_db::repo::PgProjectRepo;
 use ta_db::repo_cell::{CellLayerRepo, CellRepo, PgCellLayerRepo, PgCellRepo};
 use ta_db::repo_class::{DraftLayerRepo, PgDraftLayerRepo};
 use ta_db::repo_ruleset::{PgRuleRepo, PgRuleSetRepo, RuleRepo, RuleSetRepo};
+use ta_db::repo_scene::{PgSceneRepo, SceneRepo};
 use ta_db::repo_task::{EnqueueReport, PgTaskRepo, TaskRepo};
 use ta_engine::{CellInput, classify_batch};
 
@@ -48,12 +49,18 @@ type CellRunResult = Result<(), String>;
 // ---------------------------------------------------------------------------
 
 /// `measure set` — grava (upsert) as medidas de UMA célula.
+///
+/// `scene` (opcional) resolve a proveniência por NOME de cena; erro acionável
+/// se não existir (cenas são globais — veja `scene add`). Regrar a mesma
+/// (célula, medida) é **last-write-wins**: a última escrita vence, inclusive a
+/// proveniência (medida regravada sem `--scene` perde a cena anterior).
 pub(crate) async fn measure_set(
     dsn: Option<&str>,
     cell_layer_id: &str,
     cell_id: &str,
     values: &str,
     source: Option<String>,
+    scene: Option<&str>,
 ) -> Result<(), String> {
     let measures = parse_observations(values)?;
     let pool = crate::open_pool(dsn).await?;
@@ -73,6 +80,22 @@ pub(crate) async fn measure_set(
             layer.name
         ));
     }
+    let scene_id = match scene {
+        None => None,
+        Some(name) => Some(
+            PgSceneRepo::new(pool.clone())
+                .get_by_name(name)
+                .await
+                .map_err(|e| e.to_string())?
+                .map(|s| s.id)
+                .ok_or_else(|| {
+                    format!(
+                        "cena `{name}` não existe; crie com `ta-cli scene add --name {name}` \
+                         ou liste as existentes com `ta-cli scene list`"
+                    )
+                })?,
+        ),
+    };
     let now = time::OffsetDateTime::now_utc();
     let rows: Vec<CellMeasure> = measures
         .into_iter()
@@ -82,6 +105,7 @@ pub(crate) async fn measure_set(
             measure,
             value,
             source: source.clone(),
+            scene_id: scene_id.clone(),
             updated_on: now,
         })
         .collect();
@@ -90,10 +114,16 @@ pub(crate) async fn measure_set(
         .await
         .map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    println!(
-        "medidas gravadas: {written}\tcamada={}\tcélula={cell_id}",
-        layer.id
-    );
+    match scene {
+        Some(scene_name) => println!(
+            "medidas gravadas: {written}\tcamada={}\tcélula={cell_id}\tcena={scene_name}",
+            layer.id
+        ),
+        None => println!(
+            "medidas gravadas: {written}\tcamada={}\tcélula={cell_id}",
+            layer.id
+        ),
+    }
     pool.close().await;
     Ok(())
 }

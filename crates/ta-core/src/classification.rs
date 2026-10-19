@@ -235,8 +235,9 @@ impl DraftLayer {
 
 /// Medida observada de uma célula (`cell_measures`) — entrada da classificação.
 ///
-/// Uma linha por (célula, medida); regravar a mesma medida é upsert. O valor é
-/// sempre finito (CHECK no banco; validação no repositório).
+/// Uma linha por (célula, medida); regravar a mesma medida é upsert
+/// (**last-write-wins** por `(célula, medida)` — a última escrita vence). O
+/// valor é sempre finito (CHECK no banco; validação no repositório).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CellMeasure {
     /// Camada de células da medição.
@@ -250,9 +251,34 @@ pub struct CellMeasure {
     /// Proveniência livre (ex.: cena/índice de origem).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Cena de origem (`scenes.id`, opcional — proveniência da observação;
+    /// apagar a cena desvincula (`ON DELETE SET NULL`), não apaga a medida).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_id: Option<String>,
     /// Momento da última gravação (`cell_measures.updated_on`).
     #[serde(default = "OffsetDateTime::now_utc", with = "time::serde::rfc3339")]
     pub updated_on: OffsetDateTime,
+}
+
+/// Uma decisão de classificação gravada em um rascunho (`draft_cells`).
+///
+/// Linha de leitura para consulta/exportação: a classe decidida para a célula
+/// por qual ruleset, e quando. Referências são por id (UUID); o exchange
+/// resolve os nomes na fronteira de IO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftCell {
+    /// Rascunho dono da decisão.
+    pub draft_layer_id: String,
+    /// Grade da célula.
+    pub cell_layer_id: String,
+    /// Célula classificada (`"<col>_<row>"`).
+    pub cell_id: String,
+    /// Classe decidida.
+    pub class_id: String,
+    /// Ruleset que decidiu (proveniência).
+    pub ruleset_id: String,
+    /// Momento da decisão.
+    pub decided_on: OffsetDateTime,
 }
 
 #[cfg(test)]

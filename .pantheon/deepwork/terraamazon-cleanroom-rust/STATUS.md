@@ -1230,3 +1230,193 @@ seis fluxos de delete/cancel/grade listados acima provados contra o binário
 real · `dev-up.sh` 2× idempotente.
 
 **Nada commitado** — o usuário faz commits manualmente.
+
+## Fase 4 do fluxo — SCENES E EXCHANGE (@hermes, 2026-10-19)
+
+**Escopo entregue** (PLAN §6, Fase 4; migração `0014_scenes`; desenho
+aprovado no briefing — divergências listadas abaixo):
+
+- **Migração `0014_scenes`** (idempotente): `scenes` (global,
+  `UNIQUE(name)`, aquisição/footprint opcionais, `footprint
+  geometry(MultiPolygon,4674)`, `metadata jsonb`), `project_scenes`
+  (N:N com CASCADE duplo, `linked_on`), `cell_measures.scene_id` NULL
+  FK→`scenes` `ON DELETE SET NULL` + índice (proveniência; a PK
+  `(cell_layer_id, cell_id, measure)` e a política **last-write-wins**
+  ficam inalteradas, documentadas na migração), e
+  `projects.description` (hospeda a descrição da seção `project` do
+  exchange — ver divergência d1).
+- **Exchange `curupira-monitoring-exchange v1`** — modelo serde e dono do
+  formato em `ta-gis::exchange` (SEM dependência de banco, sem GDAL:
+  JSON puro + `wkt` 0.14 para geometria, já no lock via geozero).
+  Portabilidade por NOMES (projeto, fase, camada, `cell_id`, classe,
+  ruleset nome+versão, cena). `deny_unknown_fields` (typo não perde dado
+  silenciosamente), validação de `format`/`version` com erros tipados,
+  WKT com contexto na mensagem (`cell_layers[0].cells[2].wkt`).
+- **`exchange export --project <id|nome> --out <arquivo>`**: resolve
+  projeto EXISTENTE (sem auto-criar), coleta TODAS as seções por UUID e
+  escreve JSON pretty com contagens por seção na saída; seções vazias
+  são válidas (projeto recém-criado exporta).
+- **`exchange import --in <arquivo> --into <novo-nome>`**: RECUSA projeto
+  existente (sem merge nesta fase); recria as seções na ordem de
+  DEPENDÊNCIA — projeto(+settings) → **cenas(+vínculos)** → fases →
+  AOI(camada+features+vínculo) → grades(células bulk+bloqueios) → grupos
+  → classes (**ordem topológica por `parent_name`; ciclo é erro antes do
+  banco**) → rulesets versão explícita (+regras com `parse_predicate`
+  ANTES de gravar, erro aciona a regra) → rascunhos(+decisões) →
+  medidas(upsert). Uma transação por seção; célula de exchange entra em
+  WKT 4674 direto (sem `ST_Transform` — novo `import_cells_4674_on`).
+- **`scene add/list/link/unlink/remove`**: `remove` é destrutivo com
+  `--yes` (sem ele mostra projetos vinculados + medidas que perdem a
+  proveniência); cena global reaproveitada pelo import quando o nome já
+  existe (política documentada; `SceneDuplicate` tipado com caminho de
+  saída).
+- **`measure set --scene <nome>`**: proveniência resolvida por nome,
+  erro acionável ("não existe; crie com `scene add`"). Regrar sem
+  `--scene` SUBSTITUI a proveniência anterior (last-write-wins).
+- **ta-db**: `repo_scene` novo; variantes `_on(exec/conexão)` para o
+  import transacional (`phase/aoi/class/class_group/draft/rule/
+  ruleset-with-version/activate/block/scene create+link/feature-insert`);
+  `PgDraftLayerRepo::list_cells` (leitura de decisões para o export);
+  `PgProjectRepo::flow_settings`/`create_with_flow_settings`;
+  `upsert_measures_on`/`list_measures` com `scene_id`.
+
+**Divergências do desenho aprovado (todas mínimas e documentadas):**
+- **d1 — `projects.description`**: o schema não tinha descrição de
+  projeto; a coluna foi adicionada NA `0014` para hospedar o campo
+  `description` da seção `project` do formato aprovado (nenhum comando a
+  escreve; entra/sai pelo exchange — documentado na migração).
+- **d2 — `aoi_layer_name` opcional em `cell_layers`**: campo ADITIVO ao
+  formato; `cell_layers.aoi_layer_id` é NOT NULL no banco e a grade
+  precisa saber qual AOI recriar. Sem o campo: 1 AOI no projeto resolve
+  sozinha; 0 ou N AOIs → erro acionável pedindo o campo.
+- **d3 — cenas ANTES de medidas no import**: a lista do desenho terminava
+  em "…measures→scenes+links", mas a medida referencia a cena
+  (`scene_name`); a ordem de dependência exige cenas primeiro (a seção
+  `scenes` do DOCUMENTO continua no fim, como aprovado).
+- **d4 — import REAPROVEITA cena existente pelo nome** (cena é global,
+  `UNIQUE(name)`): criar duplicaria erro no round-trip export→import no
+  MESMO banco. Vínculo com o novo projeto é sempre gravado.
+- **d5 — múltiplos rulesets ativos no documento**: o índice parcial único
+  (máx. 1 ativo por projeto) é lei; o import ativa o PRIMEIRO ativo do
+  documento e reporta. (`rule eval` idem: ativo é o do projeto alvo.)
+- **d6 — export de cena referenciada só por medida**: entra na seção
+  `scenes` também (senão o import não resolveria `scene_name`); em
+  prática o projeto a tem vinculada.
+
+**Fora do escopo (intencional):** merge de import (recusado, documentado),
+GDAL no exchange (JSON puro), GUI, área (Fase 5), matriz de paridade
+(Fase 6). `ta-gui` não foi tocada.
+
+**Testes (+18; 324 no total):**
+- Unitários sem banco (9 em `ta-gis::exchange`): round-trip serde do doc
+  de exemplo, seções vazias válidas, `format`/`version` errados recusados,
+  seção desconhecida recusada (aponta linha), WKT inválido com contexto,
+  footprint exige (Multi)Polygon, ISO-8601 (RFC-3339 e data simples),
+  WKT do motor reparseia; 2 em `ta-core::scene` (defaults serde).
+- Gated (4 em `ta-db/tests/pg_fase4_scenes.rs`): `UNIQUE(name)` tipado,
+  footprint EWKB↔PostGIS como MultiPolygon 4674, vínculo idempotente com
+  CASCADE e `projects_using`/`measures_using`, medida sobrevive ao delete
+  da cena com SET NULL + last-write-wins da proveniência.
+- Gated E2E pelo binário (3 em `ta-cli/tests/flow_fase4_cli.rs`):
+  **round-trip completo** (projeto com fase, AOI, grade 2 células, 1
+  bloqueio, grupo+2 classes com mãe, ruleset v1 + 2 regras, `task run`
+  classificando, medidas com cena) → export → import → **contagens iguais
+  em 10 tabelas/views**, **igualdade geométrica `a.geom = b.geom` por
+  (nome da grade, cell_id)** (0 diferenças), cena reaproveitada com
+  aquisição/footprint idênticos (`ST_Equals`), decisões iguais POR NOME de
+  classe, medidas iguais, **mesma decisão `rule eval`** nos dois projetos
+  para a amostra `ndvi=0.72`; e as **6 recusas**: projeto existente, JSON
+  corrompido, versão 99, classe inexistente (aponta a regra), predicado
+  inválido (aponta a regra), projeto fantasma no export; ciclo de vida
+  `scene add/list/link/unlink/remove` com recusa sem `--yes`;
+  `measure set --scene` (erro acionável + saída com a cena).
+
+**Provas de migração (2026-10-19, conda PG16+PostGIS 3.4):** banco LIMPO →
+`migrate` aplica **14/14** e a 2ª execução reporta "nada pendente";
+banco JÁ EM 0013 (Migrator sem a 0014) → `migrate` incremental aplica
+**só a 0014** (14/14; `scenes`, `project_scenes` e
+`cell_measures.scene_id` confirmados no catálogo). `dev-up.sh` 2×
+idempotente (doctor exit 0, seed "já existia", 118 células). Round-trip
+adicional com o projeto `demo` do seed: 118 células exportadas/importadas
+com **0** diferenças em `a.geom = b.geom`.
+
+**Verificação real:** `cargo fmt --all -- --check` ✓ ·
+`cargo clippy --workspace --all-targets -- -D warnings` ✓ ·
+`cargo test --workspace` ✓ · `TA_TEST_PG=1 TA_PG_DSN=… cargo test
+--workspace` ✓ **28/28 binários, 324 testes** (gated executados de fato —
+zero "skipped").
+
+**Nada commitado** — o usuário faz commits manualmente.
+
+## Fechamento da Fase 4 — achados da revisão (Themis) aplicados (@hermes, 2026-10-19)
+
+A revisão da Fase 4 apontou 1 MAJOR, 2 MINOR e 2 NIT; todos aplicados SEM
+iniciar a Fase 5 (área/GUI/ta-flow) e SEM commit:
+
+- **MAJOR-1 — recuperabilidade de import falho:**
+  1. **Import ATÔMICO** — `exchange import` agora roda projeto + TODAS as
+     seções numa ÚNICA transação (`import_sections` sobre
+     `&mut PgConnection`; novas variantes executor: `PgProjectRepo::create_on`,
+     `PgSceneRepo::get_by_name_on`, `PgCellRepo::exists_on` — o que a seção
+     anterior gravou só é visível dentro da transação). Falha em qualquer
+     seção NÃO deixa NADA no banco (nem projeto parcial) e o mesmo `--into`
+     pode ser repetido imediatamente; a recusa de nome existente continua
+     (duplicata agora só quando o import ANTERIOR concluiu). A mensagem de
+     falha cita o caminho de saída exato:
+     `project delete --project <nome> --yes` (defesa em profundidade — com o
+     rollback nada deve restar).
+  2. **`project delete [--yes]`** — deleção ORDENADA em transação única
+     (`PgProjectRepo::delete_ordered` + `ProjectDeleteReport`), respeitando as
+     FK `ON DELETE RESTRICT` SEM desativar triggers: draft_cells → rules →
+     rulesets → cell_log → processes → tasks → cell_measures → blocked_cells →
+     cells → cell_layers → draft_layers → **aoi_layers → features → layers**
+     (aoi_layers ANTES de layers: `layer_id` é CASCADE e o relatório precisa
+     atribuir cada linha à tabela certa) → project_scenes → classes →
+     class_groups → phases → project. Relatório com contagens por tabela
+     (18 rótulos + `total=`). Sem `--yes`: recusa mostrando o resumo do que
+     seria apagado (`delete_preview`, mesmas contagens). Cenas são globais:
+     sai só o vínculo, `scenes` permanece. A deleção NÃO auto-cria projeto.
+  3. Prova real (projeto `demo` 118 células, import com falha injetada no
+     MEIO do doc — WKT inválido em `cell_layers[0].cells[7]`): falha →
+     `select count(*) from projects where name='demo_atomo2'` = **0** →
+     retry do MESMO `--into` **funciona** → `project delete --yes` reporta
+     `total=122` (cells=118, cell_layers=1, aoi_layers=1, features=1,
+     layers=1) e o banco fica zerado por id capturado.
+- **MINOR-1 — cena reaproveitada com divergência:** no import, cena existente
+  (nome é global) tem footprint (WKT normalizado pelo mesmo serializador) e
+  metadata comparados; divergência emite `aviso: cena \`X\` já existia com
+  footprint/metadata diferentes — reaproveitada sem alteração` no relatório.
+  Não falha, não sobrescreve (teste gated: footprint trocado no doc → aviso
+  presente + `ST_Equals` do conteúdo original + vínculo do projeto novo).
+- **MINOR-2 — float_roundtrip:** `serde_json = { version = "1", features =
+  ["float_roundtrip"] }` no workspace (afeta exchange inteiro). Teste
+  unitário: `9643762.620782405` no campo `value` de medida → export 2× com
+  bytes idênticos e f64 preservado no reparse.
+- **NIT-1:** mensagem de pai de classe agora diz "parent_name com ciclo ou
+  mãe inexistente entre …" (antes: "forma ciclo" — impreciso, o limite de
+  passos também dispara para mãe inexistente).
+- **NIT-2:** `scene add --footprint` distingue WKT inválido ("não é WKT
+  reconhecível e o arquivo não existe") de WKT válido não-poligonal
+  (`FootprintNotPolygonal` repaginado: "esperado POLYGON/MULTIPOLYGON,
+  recebido POINT") — POINT não caía em "não reconhecível". 3 testes
+  unitários em `flow_scene`.
+- **Risco permanente reafirmado (PLAN §10 risco 7):** FK RESTRICT ⇒
+  pré-checagem com contagens + caminho de saída explícito — agora também no
+  apagado de PROJETO inteiro (`project delete` é o caminho de saída do import
+  falho e de qualquer projeto rico com rules/draft_cells).
+
+**Testes:** +7 (331 no total, 28 binários): 1 unitário float_roundtrip
+(`ta-gis::exchange`), 3 unitários de footprint (`ta-cli::flow_scene`), 3
+gated E2E (`flow_fase4_cli.rs`): import falho não deixa projeto parcial e
+retry funciona (inclui asserção da mensagem com o comando exato de saída),
+cena divergente emite aviso e é reaproveitada sem sobrescrita,
+`project delete` sem/--yes com 18 tabelas zeradas POR ID capturado antes da
+deleção (join com projects zeraria trivialmente) e cena global sobrevivente.
+
+**Verificação real:** `cargo fmt --all -- --check` ✓ ·
+`cargo clippy --workspace --all-targets -- -D warnings` ✓ ·
+`cargo test --workspace` ✓ · `TA_TEST_PG=1 TA_PG_DSN=… cargo test
+--workspace` ✓ **28/28 binários, 331 testes** (gated executados — zero
+"skipped") · `dev-up.sh` 2× idempotente (doctor exit 0).
+
+**Nada commitado** — o usuário faz commits manualmente.

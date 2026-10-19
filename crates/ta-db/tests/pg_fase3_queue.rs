@@ -422,6 +422,7 @@ async fn run_feliz_ponta_a_ponta_com_proveniencia_e_log() {
                 measure: "ndvi".into(),
                 value: 0.8,
                 source: Some("teste".into()),
+                scene_id: None,
                 updated_on: time::OffsetDateTime::now_utc(),
             }],
         )
@@ -989,6 +990,7 @@ async fn deletes_com_draft_cells_recusam_e_force_reporta_tres_contagens() {
                 measure: "ndvi".into(),
                 value: 0.8,
                 source: Some("teste".into()),
+                scene_id: None,
                 updated_on: time::OffsetDateTime::now_utc(),
             }],
         )

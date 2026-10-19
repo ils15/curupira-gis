@@ -158,6 +158,63 @@ impl PgRuleSetRepo {
         Self { pool }
     }
 
+    /// Import do exchange: INSERT com versão EXPLÍCITA (a linhagem foi
+    /// exportada; recriá-la com `MAX(version)+1` por nome perderia buracos de
+    /// versão). Executa sobre o **executor** dado — transação da seção.
+    /// `(project_id, name, version)` duplicado é recusado pelo banco.
+    pub async fn insert_with_version_on<'e, E>(exec: E, ruleset: &RuleSet) -> Result<RuleSet>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        check_id(&ruleset.project_id)?;
+        if ruleset.version <= 0 {
+            return Err(Error::InvalidId(format!(
+                "versão de ruleset deve ser > 0 (recebido {} para `{}`)",
+                ruleset.version, ruleset.name
+            )));
+        }
+        let row: RuleSetRow = sqlx::query_as(
+            "INSERT INTO rulesets (id, project_id, name, version, description, is_active) \
+             VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2::uuid, $3, $4, $5, \
+                     false) \
+             RETURNING id::text, project_id::text, name, version, description, \
+                       created_at, updated_at",
+        )
+        .bind(&ruleset.id)
+        .bind(&ruleset.project_id)
+        .bind(&ruleset.name)
+        .bind(ruleset.version)
+        .bind(&ruleset.description)
+        .fetch_one(exec)
+        .await?;
+        Ok(ruleset_from_row(row))
+    }
+
+    /// `activate` sobre a **conexão** dada (de um pool ou transação): desativa
+    /// os demais do projeto e ativa o escolhido, na mesma transação do
+    /// chamador — o índice parcial único da `0013` nunca é desafiado.
+    pub async fn activate_on(exec: &mut sqlx::PgConnection, id: &str) -> Result<Option<RuleSet>> {
+        check_id(id)?;
+        sqlx::query(
+            "UPDATE rulesets SET is_active = false \
+             WHERE project_id = (SELECT project_id FROM rulesets WHERE id = $1::uuid) \
+               AND is_active",
+        )
+        .bind(id)
+        .execute(&mut *exec)
+        .await?;
+        let row: Option<RuleSetRow> = sqlx::query_as(
+            "UPDATE rulesets SET is_active = true, updated_at = now() \
+             WHERE id = $1::uuid \
+             RETURNING id::text, project_id::text, name, version, description, \
+                       created_at, updated_at",
+        )
+        .bind(id)
+        .fetch_optional(exec)
+        .await?;
+        Ok(row.map(ruleset_from_row))
+    }
+
     /// Pré-checagem do `ruleset delete` sobre `draft_cells`
     /// (`draft_cells.ruleset_id` é `ON DELETE RESTRICT` na 0013): quantas
     /// células o ruleset decide em CADA rascunho — `(nome do rascunho,
@@ -444,6 +501,35 @@ pub struct PgRuleRepo {
 impl PgRuleRepo {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// `create` sobre o **executor** dado (pool ou transação), SEM a
+    /// pré-checagem de projeto (que é pool-bound) — o import do exchange já
+    /// validou o par classe/ruleset por nome; o gatilho F5 da `0013` é o
+    /// backstop no banco.
+    pub async fn create_on<'e, E>(exec: E, rule: &Rule) -> Result<Rule>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        check_id(&rule.ruleset_id)?;
+        check_id(&rule.class_id)?;
+        let row: RuleRow = sqlx::query_as(
+            "INSERT INTO rules (id, ruleset_id, class_id, name, priority, predicate, is_active) \
+             VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2::uuid, $3::uuid, \
+                     $4, $5, $6, $7) \
+             RETURNING id::text, ruleset_id::text, class_id::text, name, priority, \
+                       predicate, is_active, created_at, updated_at",
+        )
+        .bind(&rule.id)
+        .bind(&rule.ruleset_id)
+        .bind(&rule.class_id)
+        .bind(&rule.name)
+        .bind(rule.priority)
+        .bind(&rule.predicate)
+        .bind(rule.is_active)
+        .fetch_one(exec)
+        .await?;
+        Ok(rule_from_row(row))
     }
 
     /// Valida que `class_id` pertence ao projeto do ruleset e devolve o

@@ -22,7 +22,10 @@ homepage = "https://github.com/ils15/curupira-gis"
 # Domínio
 geo-types = { version = "0.7", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip`: f64 do exchange (medidas, coordenadas WKT) faz round-trip
+# byte-a-byte no JSON — sem ela, serde_json usa o formato curto de Grisu e um
+# export→import 2× pode alterar o último dígito de valores não-beco.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
 time = { version = "0.3", features = ["serde-well-known"] }
 
@@ -31,6 +34,9 @@ gdal = "0.19"
 geojson = "1.0"
 csv = "1.4"
 geozero = "0.15"
+# WKT do exchange (`curupira-monitoring-exchange v1`): parse/serialização
+# pura-Rust. 0.14 é a mesma versão do lock via geozero — sem duplicação.
+wkt = "0.14"
 # FlatGeobuf puro-Rust (usa geozero 0.15 — mesma versão do workspace, sem
 # duplicação no lock). default-features = false derruba http/reqwest.
 flatgeobuf = { version = "6.0", default-features = false }

@@ -153,6 +153,17 @@ pub enum Error {
          NaN/infinito não é observação válida"
     )]
     NonFiniteMeasure { measure: String, value: f64 },
+
+    /// Já existe uma cena com esse nome — cenas são globais (`UNIQUE(name)`).
+    ///
+    /// O caminho de saída é reaproveitar a cena existente (o import do
+    /// exchange faz isso automaticamente) ou escolher outro nome.
+    #[error(
+        "cena `{name}` já existe (cenas são globais, nome é único); \
+         vincule a existente com `scene link --project <p> --scene {name}` \
+         ou escolha outro nome"
+    )]
+    SceneDuplicate { name: String },
 }
 
 /// Alias de resultado padrão da persistência.
