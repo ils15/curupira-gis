@@ -18,6 +18,7 @@ clap.workspace = true
 ta-core.workspace = true
 ta-engine.workspace = true
 ta-db.workspace = true
+ta-flow.workspace = true
 ta-gis.workspace = true
 sqlx.workspace = true
 time.workspace = true

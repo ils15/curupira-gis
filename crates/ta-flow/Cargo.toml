@@ -1,0 +1,27 @@
+[package]
+name = "ta-flow"
+description = "Executor do fluxo de monitoramento do terraamazon-cleanroom-rust: fila de processos (create/run/cancel/retry) e relatório de área. Biblioteca compartilhada por ta-cli e ta-gui — a lógica de fila/retomada NÃO se duplica."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Decisão da Fase 5a: o executor depende de core (tipos), db (repositórios) e
+# engine (motor puro de classificação) — e nada mais. Os tipos de conexão
+# (`PgPool`, `PgConnection`) vêm do re-export `ta_db::sqlx` e os erros tipados
+# têm impl manual (sem thiserror), então o `cargo tree -p ta-flow -e normal`
+# mostra SÓ core/db/engine. Sem GUI, sem CLI/clap; o runtime async é do
+# chamador (CLI tokio, GUI eframe/tokio).
+ta-core.workspace = true
+ta-db.workspace = true
+ta-engine.workspace = true
+
+[dev-dependencies]
+# #[tokio::test] dos testes gated (o runtime de produção é do chamador).
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# Montagem do fixture dos testes gated (grade + features + timestamps).
+geo-types.workspace = true
+serde_json.workspace = true
+time.workspace = true

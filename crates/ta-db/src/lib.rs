@@ -5,6 +5,8 @@
 //!   (padrão) e GPKG offline (feature `offline-gpkg`, opt-in).
 //! - [`repo_phase`], [`repo_aoi`], [`repo_cell`]: repositórios do fluxo de
 //!   monitoramento (fase, AOI/área, camadas de células/células/bloqueios).
+//! - [`repo_area`]: cálculo de área consolidado no SRS métrico do projeto
+//!   (Fase 5, Decisão 4 — nunca em graus).
 //! - [`repo_class`], [`repo_ruleset`]: classes/grupos/rascunhos e
 //!   rulesets versionados/regras (Fase 2).
 //! - [`repo_task`]: fila de processos — tasks, processos por célula, log por
@@ -21,6 +23,7 @@ pub mod ops;
 pub mod pool;
 pub mod repo;
 pub mod repo_aoi;
+pub mod repo_area;
 pub mod repo_cell;
 pub mod repo_class;
 pub mod repo_phase;
@@ -30,3 +33,8 @@ pub mod repo_task;
 pub mod spatial;
 
 pub use error::{Error, Result};
+// Re-export do sqlx para os crates internos (ex.: `ta-flow`) usarem os tipos
+// de conexão (`PgPool`, `PgConnection`) SEM declarar dependência própria — o
+// grafo normal fica core/db/engine apenas (uma única versão de sqlx no
+// workspace; nenhuma aresta nova).
+pub use sqlx;

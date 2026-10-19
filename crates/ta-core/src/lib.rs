@@ -5,6 +5,7 @@
 //! Nenhuma dependência de IO, banco ou GUI vive aqui.
 
 pub mod aoi;
+pub mod area;
 pub mod cell;
 pub mod classification;
 pub mod error;
@@ -19,6 +20,7 @@ pub mod style;
 pub mod task;
 
 pub use aoi::{AoiLayer, AreaSettings};
+pub use area::{AreaByCell, AreaByClass, AreaReport, AreaSummary};
 pub use cell::{BlockedCell, Cell, CellLayer, GridSpec};
 pub use classification::{CellMeasure, Class, ClassGroup, DraftCell, DraftLayer, DraftState};
 pub use error::{Error, GridError, Result};

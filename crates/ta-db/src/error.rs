@@ -40,6 +40,19 @@ pub enum Error {
     )]
     UnknownSrid(i32),
 
+    /// SRS geográfico (graus) informado para CÁLCULO DE ÁREA — proibido.
+    ///
+    /// Regra de domínio da Decisão 4: a área **NUNCA** é calculada em graus
+    /// (um número em °² não é área e varia com a latitude). A geometria fica
+    /// em 4674, mas o cálculo usa `ST_Transform` para o SRS métrico de
+    /// `area_settings.srs_id` (default EPSG:5880). Esta variante impede que
+    /// QUALQUER chamador (`repo_area`) some área em °² — inclusive por engano.
+    #[error(
+        "SRS EPSG:{0} é geográfico (graus): a área nunca é calculada em graus \
+         (Decisão 4); use um SRS métrico (ex.: 5880 Policônica SIRGAS 2000)"
+    )]
+    GeographicSridForArea(i32),
+
     /// O SRS declarado das geometrias de entrada difere do SRS da camada.
     ///
     /// `cells` são geradas no SRS da grade (`cell_layers.srid`) e reprojetadas

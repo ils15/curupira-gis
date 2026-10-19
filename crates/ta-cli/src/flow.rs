@@ -1356,24 +1356,16 @@ async fn resolve_class(pool: &PgPool, project_id: &str, id_or_name: &str) -> Res
 }
 
 /// Valida que a camada de células é do projeto e devolve o id canônico.
+/// Delegação fina a `ta_flow` (o executor dono da regra desde a Fase 5a) —
+/// mesmas mensagens; o texto da CLI sai do `Display` do erro tipado.
 pub(crate) async fn ensure_cell_layer_in_project(
     pool: &PgPool,
     project_id: &str,
     cell_layer_id: &str,
 ) -> Result<String, String> {
-    let layer = PgCellLayerRepo::new(pool.clone())
-        .get(cell_layer_id)
+    ta_flow::queue::ensure_cell_layer_in_project(pool, project_id, cell_layer_id)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("camada de células `{cell_layer_id}` não existe"))?;
-    if layer.project_id != project_id {
-        return Err(format!(
-            "camada de células `{cell_layer_id}` pertence a outro projeto ({}); \
-             use uma grade deste projeto",
-            layer.project_id
-        ));
-    }
-    Ok(layer.id)
+        .map_err(|e| e.to_string())
 }
 
 /// Mapa `classes.id → nome` para exibição.

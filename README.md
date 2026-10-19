@@ -217,6 +217,11 @@ ta-cli grid info --cell-layer <UUID cell_layers>
 # 5) bloquear/listar células (id "<col>_<row>", 0-based)
 ta-cli cell block --cell-layer <UUID cell_layers> --cell-id 0_0 --reason "nuvem"
 ta-cli cell list-blocked --cell-layer <UUID cell_layers>
+
+# 6) área consolidada (SRS métrico de area_settings.srs_id, default EPSG:5880;
+#    tabela em hectares; --draft acrescenta a área por classe; --json = contrato
+#    do AreaReport para consumo programático)
+ta-cli area report --cell-layer <UUID cell_layers> --draft <nome do rascunho> --json
 ```
 
 **Unidades por SRS:** `--resolution`, `--origin-x` e `--origin-y` são expressos

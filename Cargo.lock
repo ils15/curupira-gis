@@ -4749,6 +4749,7 @@ dependencies = [
  "ta-core",
  "ta-db",
  "ta-engine",
+ "ta-flow",
  "ta-gis",
  "time",
  "tokio",
@@ -4789,6 +4790,19 @@ version = "0.1.0"
 dependencies = [
  "geo-types",
  "ta-core",
+]
+
+[[package]]
+name = "ta-flow"
+version = "0.1.0"
+dependencies = [
+ "geo-types",
+ "serde_json",
+ "ta-core",
+ "ta-db",
+ "ta-engine",
+ "time",
+ "tokio",
 ]
 
 [[package]]

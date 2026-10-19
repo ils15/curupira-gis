@@ -33,6 +33,15 @@ pub trait AreaSettingsRepo: Send + Sync {
     async fn set(&self, settings: &AreaSettings) -> Result<AreaSettings>;
     /// Configurações do projeto (`None` = não definidas).
     async fn get(&self, project_id: &str) -> Result<Option<AreaSettings>>;
+    /// Configurações do projeto ou o DEFAULT (Decisão 4: EPSG:5880, ha)
+    /// quando o projeto não tem linha em `area_settings` — é assim que a
+    /// área escolhe o SRS de cálculo.
+    async fn get_or_default(&self, project_id: &str) -> Result<AreaSettings> {
+        Ok(self
+            .get(project_id)
+            .await?
+            .unwrap_or_else(|| AreaSettings::new(project_id)))
+    }
 }
 
 type AoiRow = (

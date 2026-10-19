@@ -28,6 +28,7 @@ use ta_db::pool::{self, DbConfig};
 mod doctor;
 mod dsn;
 mod flow;
+mod flow_area;
 mod flow_exchange;
 mod flow_scene;
 mod flow_task;
@@ -269,10 +270,45 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ExchangeCmd,
     },
+    /// Cálculo de área consolidado — relatório por grade/rascunho (Fase 5).
+    ///
+    /// A área é calculada no SRS MÉTRICO de `area_settings.srs_id` do projeto
+    /// (default EPSG:5880 — Decisão 4); nunca em graus (4674 é só
+    /// armazenamento).
+    Area {
+        #[command(subcommand)]
+        cmd: AreaCmd,
+    },
     /// Projetos — deleção completa com relatório (Fase 4).
     Project {
         #[command(subcommand)]
         cmd: ProjectCmd,
+    },
+}
+
+/// Subcomandos de `area` (Fase 5).
+#[derive(Debug, Subcommand)]
+enum AreaCmd {
+    /// Relatório de área da grade: total, bloqueada, disponível (em ha) —
+    /// e por classe do rascunho, com `--draft`. O SRS usado é impresso
+    /// sempre; `--srs` sobrepõe `area_settings.srs_id` (default 5880).
+    /// SRS geográfico (graus) é recusado: área nunca é calculada em graus.
+    Report {
+        /// Id (UUID) da camada de células.
+        #[arg(long)]
+        cell_layer: String,
+        /// Nome do rascunho classificado — acrescenta a área por classe.
+        #[arg(long)]
+        draft: Option<String>,
+        /// EPSG métrico do cálculo (padrão: `area_settings.srs_id` do
+        /// projeto; sem linha, 5880 Policônica SIRGAS 2000).
+        #[arg(long)]
+        srs: Option<i32>,
+        /// Saída em JSON (mesmo contrato para CLI e GUI).
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        dsn: Option<String>,
     },
 }
 
@@ -1450,6 +1486,18 @@ async fn main() -> ExitCode {
             }
             ExchangeCmd::Import { input, into, dsn } => {
                 flow_exchange::exchange_import(dsn.as_deref(), &input, &into).await
+            }
+        },
+        Cmd::Area { cmd } => match cmd {
+            AreaCmd::Report {
+                cell_layer,
+                draft,
+                srs,
+                json,
+                dsn,
+            } => {
+                flow_area::area_report(dsn.as_deref(), &cell_layer, draft.as_deref(), srs, json)
+                    .await
             }
         },
         Cmd::Project { cmd } => match cmd {

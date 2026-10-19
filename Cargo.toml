@@ -5,6 +5,7 @@ members = [
     "crates/ta-engine",
     "crates/ta-gis",
     "crates/ta-db",
+    "crates/ta-flow",
     "crates/ta-gui",
     "crates/ta-cli",
 ]
@@ -66,4 +67,5 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ta-core = { path = "crates/ta-core" }
 ta-engine = { path = "crates/ta-engine" }
 ta-db = { path = "crates/ta-db" }
+ta-flow = { path = "crates/ta-flow" }
 ta-gis = { path = "crates/ta-gis" }
