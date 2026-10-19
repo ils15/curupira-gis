@@ -280,11 +280,12 @@ fora do enfileiramento.
 **Comandos (executados):** `measure import-csv` → `task create … classify` →
 `task run` → `draft list` → `cell log`/`process list` (mesmos da seção 6).
 
-Saída observada: 117 células processadas (todas as elegíveis), **3 decisões**
-gravadas — o número de decisões não é o número de células medidas: depende de
-as regras casarem. Na reprodução do Themis, 3 células medidas produziram **2**
-decisões; nesta execução, 3. 0 erros, `draft` em estado `draft`, log por
-célula.
+Saída observada: 117 células processadas (todas as elegíveis) e **3 decisões**
+gravadas. O número de decisões **não** é 1:1 com o de células medidas: só há
+decisão onde alguma regra casa com as medidas da célula. No exemplo do gate
+do Themis, 3 células medidas produziram **2** decisões; nesta execução foram
+**3** decisões em 117 células processadas. 0 erros, `draft` em estado `draft`,
+log por célula.
 
 **Testes:**
 

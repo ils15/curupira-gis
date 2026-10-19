@@ -5,7 +5,7 @@
 - **Aprovação:** 2026-10-18
 - **Repositório:** `/home/jovyan/testes/terraamazon-cleanroom-rust` (publicado em https://github.com/ils15/curupira-gis)
 - **Relação com os registros anteriores:** **não substitui** `PLAN.md` (Gate 1, v0.1.0→v0.2.2) nem as seções históricas de `STATUS.md`. É um **re-planejamento** que reusa o que já existe (workspace, licença dual, barreira clean-room, PostGIS/`sqlx`, `ta-cli`, `ta-gui`) e renumera as fases do **fluxo de monitoramento** de `0` a `6`.
-- **Estado:** **Fase 0 concluída**; **Fase 1 implementada e revisada** (Themis, 2026-10-18) e **aguardando commit**. Fases 2–6 **pendentes**.
+- **Estado:** **Fases 0–6 implementadas e commitadas** (`3bee087` … `e749637`, que fecha a Fase 6). Gate final do Themis (2026-10-19): **aprovado com ressalvas, 0 blockers**; o que segue em aberto está no §10.
 
 > **Proveniência / barreira clean-room.** Este documento é derivado **apenas** de documentação pública e especificação comportamental (ver `CONTRIBUTING.md`, linhas 16–29). **Nenhum** conteúdo derivado de engenharia reversa do produto legado está aqui — nem offsets, nem assembly/bytecode, nem pseudocódigo decompilado, nem schema/SQL extraído de binário, nem `hex dumps`, nem símbolos internos. As únicas menções ao material legado são de **proibição e remoção** (Decisão 1).
 
@@ -312,8 +312,8 @@ semiaberta (`>=` no mínimo, `<` no máximo), nunca essas funções.
   `ta-flow` extraído (CLI e GUI usam o mesmo executor), área consolidada e
   fluxo completo pela GUI (painel de monitoramento/canvas). 368 testes na
   ocasião.
-- **Fase 6a (hardening/métricas): CONCLUÍDA** (2026-10-19, árvore de
-  trabalho, sem commit). Fechado:
+- **Fase 6a (hardening/métricas): CONCLUÍDA** (2026-10-19; commitada pelo
+  usuário em `e749637`). Fechado:
   - dívida de teste do `reset_demo` **corrigida** (reset pelo caminho
     ordenado `project delete --yes`, com teste de regressão para projeto
     demo COM ruleset+regra+task executada; suíte gated 2× estável);
@@ -332,7 +332,7 @@ semiaberta (`>=` no mínimo, `<` no máximo), nunca essas funções.
     `benches/BASELINE.md` (sem regressão conclusiva; MVT continua não
     medido neste host por falta de protobuf-c).
 - **Fase 6b (matriz de paridade + documentação final): CONCLUÍDA**
-  (2026-10-19, árvore de trabalho, sem commit) — `docs/PARITY.md` revisado
+  (2026-10-19; commitada pelo usuário em `e749637`) — `docs/PARITY.md` revisado
   (10 itens IN com evidência, OUT/barreira separados), `README.md`,
   `STATUS.md`, `PARITY-MATRIX.md` e `benches/BASELINE.md` atualizados com
   **369 testes** em 35 alvos (21 integração + 7 unit + 7 doc-tests), 3 testes
@@ -344,11 +344,31 @@ semiaberta (`>=` no mínimo, `<` no máximo), nunca essas funções.
   `draft_layers` no `project delete` corrigida (ordem + regressão), fixture
   `testdata/monitoring/medidas.csv`, e formulação honesta sobre MVT
   auto-pulado (3 testes) em vez de "0 skipped".
-- Dívidas de teste adiadas para o hardening da Fase 6: dedup de helpers de
-  teste (n7), n8 e n13 — **ainda abertas** (não tocadas nesta rodada; a
-  corrida entre testes do `demo` foi resolvida com um mutex de teste, não é
-  o dedup).
-- Nada foi commitado por este registro (o usuário faz commits manualmente).
+- **Gate final do Themis (2026-10-19): APROVADO COM RESSALVAS, 0 blockers.**
+  Os achados **M1/M2** e **m1–m7** do gate foram **aplicados** nesta fase —
+  são os itens listados no bullet da Fase 6b acima (comando do round-trip
+  `ta-gis` com `--features`, separação `MAX_CELLS`, contagem de
+  `draft_layers` no `project delete`, fixture `medidas.csv`, `task run` com
+  todas as células elegíveis, e formulação honesta do auto-pulo de MVT). As
+  ressalvas que o gate deixou abertas estão registradas em "O que segue
+  honestamente em aberto" abaixo — nenhuma foi fechada por declaração.
+- **O que segue honestamente em aberto depois da Fase 6** (não fechado, sem
+  número inventado):
+  1. **MVT sem prova real neste host** — o PostGIS conda-forge não traz
+     protobuf-c, então os 3 testes de MVT se auto-pulam (com mensagem). A
+     prova real depende do job `linux-pg` do CI (imagem
+     `postgis/postgis:16-3.4`).
+  2. **Dedup de helpers de teste (n7/n8/n13)** — adiado; a corrida entre
+     testes do `demo` foi resolvida com um mutex de teste, o que **não** é
+     dedup.
+  3. **Inspeção visual humana** — não feita (o host de referência não tem
+     display); a visualização está verificada por contrato headless, e por
+     isso o item 10 da matriz (`docs/PARITY.md`) fica ⚠️ parcial.
+  4. **Escala 1M de células** — nem o teto do motor (`MAX_CELLS = 5 000 000`)
+     nem o teto de negócio default (`projects.max_cells = 1 000 000`) foram
+     medidos; o bench cobre 10 000 feições.
+- Nada foi commitado por este registro (o usuário faz commits manualmente); a
+  Fase 6 já está commitada em `e749637`.
 - Nenhum ADR foi criado (não solicitado).
 
 ## 11. Riscos transversais

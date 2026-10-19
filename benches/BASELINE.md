@@ -17,12 +17,20 @@ cluster efêmero conda-forge (`scripts/test-pg.sh --no-tests`, porta 55432).
 Criterion: `sample_size = 10`, warm-up 1 s, medição 3 s (o cenário de
 `bulk_insert` estendeu para ~5,1 s para completar as 10 amostras).
 
-| cenário | mean | [IC 95% da média] | o que mede |
+| cenário | mean | [IC 95% do criterion — 10 amostras, 1 execução] | o que mede |
 |---|---|---|---|
 | `bulk_insert/10k_poligonos` | **500,9 ms** | [435,1 ms – 578,7 ms] | COPY FROM STDIN de 10k polígonos + atributos (fallback batched INSERT) |
 | `bbox_query/janela_viewport` | **12,13 ms** | [12,03 ms – 12,24 ms] | `&&` + GIST devolvendo ~4 000 feições (10°×4°) com geometria e attrs |
 | `list_with_ids/10k` | **26,07 ms** | [25,83 ms – 26,43 ms] | leitura completa (id de linha + EWKB + attrs) dos 10k |
 | `mvt_tile/z12_viewport` | **não medido** | — | `ST_AsMVT` — ver limitação abaixo |
+
+> **Como ler os dois intervalos deste arquivo.** O intervalo da tabela acima
+> é o **IC 95% do criterion** dentro de **uma execução** de 10 amostras
+> (2026-10-18) — o que o runner imprime. O da re-execução de fechamento
+> (Fase 6a, tabela mais abaixo) é a **faixa das 3 execuções**, isto é,
+> **mínimo–máximo entre execuções**, não um intervalo de confiança. As duas
+> grandezas não são comparáveis entre si; a comparação da Fase 6a usa a
+> coluna "baseline (2026-10-18)" (as médias), não os intervalos.
 
 Leitura dos números:
 
