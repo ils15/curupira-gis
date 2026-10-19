@@ -53,6 +53,20 @@ pub enum Error {
     )]
     GeographicSridForArea(i32),
 
+    /// SRS **não métrico** (ex.: pés) informado para cálculo de área.
+    ///
+    /// `ST_Area` sobre um SRS em pés devolve pés², não metros² — rotular esse
+    /// número como m² seria um erro silencioso de unidade (a mesma classe de
+    /// erro da Decisão 4, que proíbe graus). `ensure_metric_srs` exige a
+    /// unidade `metros` do `spatial_ref_sys`; um EPSG em pés (ex.: 2263) é
+    /// recusado com esta mensagem.
+    #[error(
+        "SRS EPSG:{srs} está em `{units}` (não metros): a área é reportada em m² \
+         e um SRS não métrico produziria números rotulados errado; use um SRS \
+         em metros (ex.: 5880 Policônica SIRGAS 2000)"
+    )]
+    NonMetricSridForArea { srs: i32, units: String },
+
     /// O SRS declarado das geometrias de entrada difere do SRS da camada.
     ///
     /// `cells` são geradas no SRS da grade (`cell_layers.srid`) e reprojetadas

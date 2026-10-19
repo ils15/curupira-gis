@@ -19,11 +19,12 @@ use ta_gis::raster::RasterMeta;
 
 use crate::app_state::{AppState, Conn, EditMode};
 use crate::attr_table::attribute_table;
-use crate::db_worker::{DbCmd, DbEvt, DbWorker};
+use crate::db_worker::{DbCmd, DbEvt, DbWorker, ExchangeMode, ExchangeRequest};
 use crate::dialogs::dialogs;
 use crate::i18n::Key as L;
 use crate::import_job::{ImportJob, ImportMsg, PendingImport, spawn_import};
 use crate::map_view::MapView;
+use crate::monitoring::{MonitoringState, TaskUi};
 use crate::panels;
 use crate::raster_view;
 use crate::workbench::WorkbenchConfig;
@@ -142,6 +143,9 @@ pub struct TerraApp {
     // ---- v0.2.2 (registro de comandos) -------------------------------
     /// Último título de janela enviado (evita `ViewportCommand` por frame).
     pub last_title: Option<String>,
+    // ---- Fase 5b (monitoramento) -------------------------------------
+    /// Estado da janela de monitoramento (AOI/células/classes/task/área).
+    pub monitoring: MonitoringState,
 }
 
 /// Campos do formulário de conexão.
@@ -214,6 +218,7 @@ impl TerraApp {
             import_queue: Vec::new(),
             import_queue_auto: false,
             last_title: None,
+            monitoring: MonitoringState::default(),
         }
     }
 
@@ -479,6 +484,442 @@ impl TerraApp {
     }
 
     // ------------------------------------------------------------------
+    // Fase 5b: monitoramento (AOI/células/classes, task e área)
+    // ------------------------------------------------------------------
+
+    /// BBox do canvas em coordenadas de mundo (4674) — consulta da viewport.
+    ///
+    /// Margem de 15% em torno do visível (m2): o pan pequeno continua com
+    /// células já em cache; o limiar de [`crate::monitoring::needs_reload`]
+    /// (20% de deslocamento / 25% de zoom) permanece o mesmo e mede a mudança
+    /// sobre esta bbox, não sobre o quadro exato.
+    pub fn canvas_bbox(&self) -> [f64; 4] {
+        const MARGIN: f64 = 0.15;
+        let (cx, cy) = self.map.viewport().center();
+        let (w, h) = self.map.viewport().size_px();
+        let scale = self.map.viewport().px_per_unit();
+        if !scale.is_finite() || scale <= 0.0 || w <= 0.0 || h <= 0.0 {
+            return [cx, cy, cx, cy];
+        }
+        let hw = f64::from(w) / (2.0 * scale) * (1.0 + MARGIN);
+        let hh = f64::from(h) / (2.0 * scale) * (1.0 + MARGIN);
+        [cx - hw, cy - hh, cx + hw, cy + hh]
+    }
+
+    /// Primeira camada poligonal da sessão (default de AOI no formulário).
+    fn first_polygon_layer(&self) -> Option<String> {
+        self.state
+            .layers
+            .iter()
+            .find(|g| {
+                matches!(
+                    g.layer.geom_type,
+                    ta_core::layer::GeomType::Polygon
+                        | ta_core::layer::GeomType::MultiPolygon
+                        | ta_core::layer::GeomType::GeometryCollection
+                )
+            })
+            .map(|g| g.layer.id.clone())
+    }
+
+    /// Valores iniciais dos formulários do monitoramento (idempotente).
+    fn ensure_monitoring_defaults(&mut self) {
+        if self.monitoring.new_grid_resolution.trim().is_empty() {
+            self.monitoring.new_grid_resolution = "0.01".to_owned();
+        }
+        if self.monitoring.new_grid_srid.trim().is_empty() {
+            self.monitoring.new_grid_srid = ta_core::project::DEFAULT_SRID.to_string();
+        }
+        if self.monitoring.aoi_layer_id.is_none() {
+            self.monitoring.aoi_layer_id = self.first_polygon_layer();
+        }
+    }
+
+    /// Abre a janela de monitoramento (M3: toggle de célula ligado por padrão).
+    pub fn open_monitoring(&mut self) {
+        self.monitoring.open = true;
+        self.monitoring.pick_cells = true;
+        self.ensure_monitoring_defaults();
+        self.request_monitoring();
+        if !self.monitoring.cells.is_empty() {
+            self.refresh_monitoring_overlay();
+        }
+    }
+
+    /// Descarta o estado do projeto anterior e pede as listas do projeto novo.
+    pub fn reset_monitoring(&mut self) {
+        let open = self.monitoring.open;
+        let pick_cells = self.monitoring.pick_cells;
+        let exchange_path = std::mem::take(&mut self.monitoring.exchange_path);
+        let exchange_into = std::mem::take(&mut self.monitoring.exchange_into);
+        self.monitoring = MonitoringState {
+            open,
+            pick_cells,
+            exchange_path,
+            exchange_into,
+            ..MonitoringState::default()
+        };
+        self.ensure_monitoring_defaults();
+        self.map.set_cell_overlay(None);
+        self.request_monitoring();
+    }
+
+    /// Lê fases/AOIs/grades/rascunhos/classes do projeto aberto.
+    pub fn request_monitoring(&mut self) {
+        let Some(project) = self.state.project.clone() else {
+            return;
+        };
+        if self.state.conn.is_db() {
+            self.state.conn.send(DbCmd::LoadMonitoring {
+                project_id: project.id,
+            });
+            self.info = Some(self.t(L::Loading).to_owned());
+        }
+    }
+
+    /// Pede o relatório de área do rascunho/grade correntes.
+    pub fn request_area(&mut self) {
+        let Some(layer) = self.monitoring.selected_cell_layer.clone() else {
+            self.monitoring.area = None;
+            return;
+        };
+        if !self.state.conn.is_db() {
+            return;
+        }
+        self.monitoring.area_seq = self.monitoring.area_seq.wrapping_add(1);
+        self.state.conn.send(DbCmd::AreaReport {
+            seq: self.monitoring.area_seq,
+            cell_layer_id: layer,
+            draft_name: self.monitoring.draft_name().map(str::to_owned),
+        });
+    }
+
+    /// Pede as células da viewport (respeita a tolerância de pan/zoom).
+    ///
+    /// `force` = troca de grade/rascunho ou refresh explícito.
+    pub fn request_cell_view(&mut self, force: bool) {
+        let Some(layer) = self.monitoring.selected_cell_layer.clone() else {
+            if !self.monitoring.cells.is_empty() {
+                self.monitoring.cells.clear();
+                self.monitoring.cells_truncated = false;
+                self.refresh_monitoring_overlay();
+            }
+            return;
+        };
+        if !self.state.conn.is_db() {
+            return;
+        }
+        let bbox = self.canvas_bbox();
+        let key = self.monitoring.view_key();
+        let key_changed = self.monitoring.last_key.as_ref() != Some(&key);
+        if !force && !crate::monitoring::needs_reload(self.monitoring.last_bbox, bbox, key_changed)
+        {
+            return;
+        }
+        self.monitoring.view_seq = self.monitoring.view_seq.wrapping_add(1);
+        self.monitoring.last_bbox = Some(bbox);
+        self.monitoring.last_key = Some(key.clone());
+        self.state.conn.send(DbCmd::LoadCellView {
+            seq: self.monitoring.view_seq,
+            cell_layer_id: layer,
+            draft_layer_id: key.1,
+            bbox,
+        });
+    }
+
+    /// Grade/rascunho/AOI mudou: recarrega células, área e o overlay.
+    pub fn on_monitoring_selection_changed(&mut self) {
+        self.monitoring.selected_cell = None;
+        // Limpa o cache ANTES da resposta: clique/bloqueio nunca pode agir
+        // sobre células da grade/rascunho anterior.
+        self.monitoring.cells.clear();
+        self.monitoring.cells_truncated = false;
+        self.monitoring.area = None;
+        self.monitoring.last_bbox = None;
+        self.request_cell_view(true);
+        self.request_area();
+        self.refresh_monitoring_overlay();
+    }
+
+    /// Remonta o overlay do canvas (AOI + células coloridas por `classes.color`).
+    pub fn refresh_monitoring_overlay(&mut self) {
+        let aoi = crate::monitoring::aoi_polygons(&self.state.layers, self.monitoring.aoi());
+        let overlay = crate::monitoring::overlay(
+            &self.monitoring.cells,
+            &self.monitoring.data.classes,
+            aoi,
+            self.monitoring.selected_cell.as_deref(),
+        );
+        self.map.set_cell_overlay(Some(overlay));
+    }
+
+    /// Cria e executa a task de classificação via `ta_flow` (worker).
+    pub fn classify_selected(&mut self) {
+        if self.monitoring.task.is_running() {
+            return;
+        }
+        let Some(project) = self.state.project.clone() else {
+            self.error = Some(self.t(L::MonitoringNoProject).to_owned());
+            return;
+        };
+        let Some(cell_layer_id) = self.monitoring.selected_cell_layer.clone() else {
+            self.error = Some(self.t(L::DisabledNoCellLayer).to_owned());
+            return;
+        };
+        if !self.state.conn.is_db() {
+            self.error = Some(self.t(L::DisabledNoDb).to_owned());
+            return;
+        }
+        self.monitoring.task = TaskUi::Running {
+            task_id: None,
+            draft_name: self.monitoring.draft_name().map(str::to_owned),
+            total: None,
+            processed: 0,
+            errors: 0,
+            draft_rows: 0,
+            last_error: None,
+        };
+        self.monitoring.area = None;
+        self.state.conn.send(DbCmd::ClassifyTask {
+            project,
+            cell_layer_id,
+            draft_name: self.monitoring.draft_name().map(str::to_owned),
+            task_name: None,
+        });
+        self.info = Some(self.t(L::Loading).to_owned());
+    }
+
+    /// Cria a fase pelo mesmo `ta_flow::phase::create` da CLI (B1).
+    pub fn create_phase(&mut self) {
+        let Some(project) = self.state.project.clone() else {
+            self.error = Some(self.t(L::MonitoringNoProject).to_owned());
+            return;
+        };
+        if !self.state.conn.is_db() {
+            self.error = Some(self.t(L::DisabledNoDb).to_owned());
+            return;
+        }
+        let name = self.monitoring.new_phase_name.trim().to_owned();
+        if name.is_empty() {
+            self.error = Some(self.t(L::MonitoringPhaseNameHint).to_owned());
+            return;
+        }
+        let description = self.monitoring.new_phase_description.trim().to_owned();
+        self.state.conn.send(DbCmd::CreatePhase {
+            project_id: project.id,
+            name,
+            description,
+        });
+        self.info = Some(self.t(L::Loading).to_owned());
+    }
+
+    /// Vincula a camada vetorial escolhida como AOI (`ta_flow::aoi::create`).
+    pub fn link_aoi(&mut self) {
+        let Some(project) = self.state.project.clone() else {
+            self.error = Some(self.t(L::MonitoringNoProject).to_owned());
+            return;
+        };
+        if !self.state.conn.is_db() {
+            self.error = Some(self.t(L::DisabledNoDb).to_owned());
+            return;
+        }
+        let Some(layer_id) = self.monitoring.aoi_layer_id.clone() else {
+            self.error = Some(self.t(L::MonitoringAoiNoLayer).to_owned());
+            return;
+        };
+        let id_column = {
+            let text = self.monitoring.aoi_id_column.trim();
+            (!text.is_empty()).then(|| text.to_owned())
+        };
+        self.state.conn.send(DbCmd::LinkAoi {
+            project_id: project.id,
+            layer_id,
+            id_column,
+        });
+        self.info = Some(self.t(L::Loading).to_owned());
+    }
+
+    /// Gera a grade da AOI selecionada (`ta_flow::grid::create`).
+    pub fn create_grid(&mut self) {
+        let Some(aoi_id) = self.monitoring.selected_aoi.clone() else {
+            self.error = Some(self.t(L::MonitoringGridHint).to_owned());
+            return;
+        };
+        if !self.state.conn.is_db() {
+            self.error = Some(self.t(L::DisabledNoDb).to_owned());
+            return;
+        }
+        let resolution = match self.monitoring.new_grid_resolution.trim().parse::<f64>() {
+            Ok(value) if value.is_finite() && value > 0.0 => value,
+            _ => {
+                self.error = Some(self.t(L::MonitoringGridResolutionHint).to_owned());
+                return;
+            }
+        };
+        let srid = match self.monitoring.new_grid_srid.trim().parse::<i32>() {
+            Ok(value) if value > 0 => value,
+            _ => {
+                self.error = Some(self.t(L::MonitoringGridSridHint).to_owned());
+                return;
+            }
+        };
+        let name = {
+            let text = self.monitoring.new_grid_name.trim();
+            if text.is_empty() {
+                "grade".to_owned()
+            } else {
+                text.to_owned()
+            }
+        };
+        self.state.conn.send(DbCmd::CreateGrid {
+            aoi_id,
+            name,
+            resolution,
+            srid,
+        });
+        self.monitoring.grid_cells = None;
+        self.info = Some(self.t(L::Loading).to_owned());
+    }
+
+    /// Ativa o ruleset escolhido (`ta_flow::ruleset::activate`).
+    pub fn activate_ruleset(&mut self) {
+        let Some(project) = self.state.project.clone() else {
+            self.error = Some(self.t(L::MonitoringNoProject).to_owned());
+            return;
+        };
+        if !self.state.conn.is_db() {
+            self.error = Some(self.t(L::DisabledNoDb).to_owned());
+            return;
+        }
+        let name = self.monitoring.ruleset_name.trim().to_owned();
+        if name.is_empty() {
+            self.error = Some(self.t(L::MonitoringRulesetSelectHint).to_owned());
+            return;
+        }
+        let version = match self.monitoring.ruleset_version.trim().parse::<i32>() {
+            Ok(value) if value > 0 => value,
+            _ => {
+                self.error = Some(self.t(L::MonitoringRulesetVersionHint).to_owned());
+                return;
+            }
+        };
+        self.state.conn.send(DbCmd::ActivateRuleset {
+            project_id: project.id,
+            project_name: project.name,
+            name,
+            version,
+        });
+        self.info = Some(self.t(L::Loading).to_owned());
+    }
+
+    /// Importa o CSV LONG de medidas para a grade selecionada.
+    pub fn import_measures(&mut self) {
+        if !self.state.conn.is_db() {
+            self.error = Some(self.t(L::DisabledNoDb).to_owned());
+            return;
+        }
+        let Some(cell_layer_id) = self.monitoring.selected_cell_layer.clone() else {
+            self.error = Some(self.t(L::DisabledNoCellLayer).to_owned());
+            return;
+        };
+        let path = self.monitoring.measures_path.trim().to_owned();
+        if path.is_empty() {
+            self.error = Some(self.t(L::MonitoringMeasuresHint).to_owned());
+            return;
+        }
+        self.state.conn.send(DbCmd::ImportMeasures {
+            cell_layer_id,
+            path,
+        });
+        self.monitoring.measures_report = None;
+        self.info = Some(self.t(L::Loading).to_owned());
+    }
+
+    /// Pede o cancelamento cooperativo da task (M1).
+    pub fn cancel_task(&mut self, task_id: &str) {
+        if !self.state.conn.is_db() {
+            self.error = Some(self.t(L::DisabledNoDb).to_owned());
+            return;
+        }
+        self.monitoring.cancel_requested = true;
+        self.state.conn.send(DbCmd::CancelTask {
+            task_id: task_id.to_owned(),
+        });
+        self.info = Some(self.t(L::MonitoringCancelRequested).to_owned());
+    }
+
+    /// Bloqueia/desbloqueia a célula clicada (persistido por `blocked_cells`).
+    pub fn toggle_selected_cell_block(&mut self) {
+        let (Some(cell_layer_id), Some(cell_id)) = (
+            self.monitoring.selected_cell_layer.clone(),
+            self.monitoring.selected_cell.clone(),
+        ) else {
+            return;
+        };
+        if !self.state.conn.is_db() {
+            self.error = Some(self.t(L::DisabledNoDb).to_owned());
+            return;
+        }
+        let blocked = !self.monitoring.selected_cell_blocked();
+        self.state.conn.send(DbCmd::SetCellBlocked {
+            cell_layer_id,
+            cell_id,
+            blocked,
+        });
+    }
+
+    /// Zoom para a AOI selecionada (extensão das feições da camada).
+    pub fn zoom_to_aoi(&mut self) {
+        let polys = crate::monitoring::aoi_polygons(&self.state.layers, self.monitoring.aoi());
+        let mut acc: Option<[f64; 4]> = None;
+        for poly in &polys {
+            for c in poly.exterior().0.iter() {
+                match &mut acc {
+                    None => acc = Some([c.x, c.y, c.x, c.y]),
+                    Some(b) => {
+                        b[0] = b[0].min(c.x);
+                        b[1] = b[1].min(c.y);
+                        b[2] = b[2].max(c.x);
+                        b[3] = b[3].max(c.y);
+                    }
+                }
+            }
+        }
+        if let Some([min_x, min_y, max_x, max_y]) = acc {
+            self.map
+                .zoom_to(crate::map_view::Bbox::new(min_x, min_y, max_x, max_y));
+            self.monitoring.last_bbox = None;
+            self.request_cell_view(true);
+        }
+    }
+
+    /// Dispara export/import do exchange (binário da CLI, no worker).
+    pub fn run_exchange(&mut self, mode: ExchangeMode, project: String, into: Option<String>) {
+        let path = self.monitoring.exchange_path.trim().to_owned();
+        let into = into.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+        if path.is_empty() {
+            self.error = Some(self.t(L::MonitoringExchangePathHint).to_owned());
+            return;
+        }
+        if !self.state.conn.is_db() {
+            self.error = Some(self.t(L::DisabledNoDb).to_owned());
+            return;
+        }
+        if mode == ExchangeMode::Import && into.is_none() {
+            self.error = Some(self.t(L::MonitoringExchangeIntoHint).to_owned());
+            return;
+        }
+        self.monitoring.exchange_busy = true;
+        self.state.conn.send(DbCmd::Exchange(ExchangeRequest {
+            mode,
+            project,
+            path,
+            into,
+        }));
+        self.info = Some(self.t(L::Loading).to_owned());
+    }
+
+    // ------------------------------------------------------------------
     // Atalhos de teclado (a11y)
     // ------------------------------------------------------------------
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
@@ -570,6 +1011,14 @@ impl TerraApp {
     // ------------------------------------------------------------------
     // Bomba de eventos (banco + import)
     // ------------------------------------------------------------------
+    /// Limpa o status "Carregando…" quando uma operação termina (m1): todo
+    /// `Loading` vira sucesso (info) ou erro (`self.error`), nunca fica preso.
+    fn clear_loading(&mut self) {
+        if self.info.as_deref() == Some(self.t(L::Loading)) {
+            self.info = None;
+        }
+    }
+
     fn drain_db_events(&mut self) {
         let events = match &self.state.conn {
             Conn::Db(w) => {
@@ -595,6 +1044,7 @@ impl TerraApp {
                     self.state.project = None;
                     self.state.layers.clear();
                     self.state.sync_map(&mut self.map);
+                    self.reset_monitoring();
                 }
                 DbEvt::Projects(list) => self.projects_cache = list,
                 DbEvt::ProjectCreated(p) => {
@@ -610,6 +1060,8 @@ impl TerraApp {
                     self.state.selection = None;
                     self.state.active_layer = None;
                     self.zoom_to_extent();
+                    // Fase 5b: listas do monitoramento do projeto novo.
+                    self.reset_monitoring();
                 }
                 DbEvt::LayerRefreshed(handle) => {
                     if let Some(g) = self
@@ -668,6 +1120,7 @@ impl TerraApp {
                         self.state.selection = None;
                         self.state.active_layer = None;
                         self.state.sync_map(&mut self.map);
+                        self.reset_monitoring();
                     }
                     self.info = Some(self.t(L::DeleteProject).to_owned());
                 }
@@ -707,7 +1160,188 @@ impl TerraApp {
                 DbEvt::QueryResult(rows) => {
                     self.dlg.sql_rows = Some(rows);
                 }
-                DbEvt::Failed(msg) => self.error = Some(msg),
+                // ---- Fase 5b (monitoramento) ---------------------------
+                DbEvt::MonitoringLoaded(data) => {
+                    // Descarta resposta de projeto fechado/trocado.
+                    let current = self.state.project.as_ref().map(|p| p.id.as_str());
+                    if current == Some(data.project_id.as_str()) {
+                        self.clear_loading();
+                        self.monitoring.apply(data);
+                        self.on_monitoring_selection_changed();
+                    }
+                }
+                DbEvt::CellViewLoaded {
+                    seq,
+                    cells,
+                    truncated,
+                } => {
+                    if seq == self.monitoring.view_seq {
+                        self.monitoring.cells = cells;
+                        self.monitoring.cells_truncated = truncated;
+                        // Célula selecionada pode ter saído da viewport.
+                        if let Some(id) = self.monitoring.selected_cell.clone() {
+                            if !self.monitoring.cells.iter().any(|c| c.cell_id == id) {
+                                self.monitoring.selected_cell = None;
+                            }
+                        }
+                        self.refresh_monitoring_overlay();
+                    }
+                }
+                DbEvt::AreaReported { seq, result } => {
+                    if seq == self.monitoring.area_seq {
+                        match result {
+                            Ok(report) => self.monitoring.area = Some(report),
+                            Err(msg) => {
+                                self.monitoring.area = None;
+                                self.error = Some(format!("{}: {msg}", self.t(L::MonitoringArea)));
+                            }
+                        }
+                    }
+                }
+                DbEvt::TaskCreated {
+                    task_id,
+                    draft_name,
+                    total,
+                } => {
+                    self.monitoring.cancel_requested = false;
+                    self.monitoring.task.begin(task_id, Some(draft_name), total);
+                }
+                DbEvt::TaskProgress(event) => self.monitoring.task.record(&event),
+                DbEvt::TaskFinished(outcome) => {
+                    self.monitoring.task.finish(&outcome);
+                    self.monitoring.cancel_requested = false;
+                    let status = match &self.monitoring.task {
+                        TaskUi::Done { status, .. } => Some(*status),
+                        _ => None,
+                    };
+                    self.info = Some(match status {
+                        Some(status) => format!(
+                            "{} ({})",
+                            self.t(L::MonitoringTaskDone),
+                            self.t(crate::monitoring::status_key(status))
+                        ),
+                        None => self.t(L::MonitoringTaskDone).to_owned(),
+                    });
+                    // A execução gravou decisões: rascunho, células e área mudam.
+                    self.request_monitoring();
+                    self.monitoring.last_bbox = None;
+                    self.request_cell_view(true);
+                    self.request_area();
+                }
+                DbEvt::TaskFailed(msg) => {
+                    self.monitoring.task = TaskUi::Failed(msg.clone());
+                    self.monitoring.cancel_requested = false;
+                    self.clear_loading();
+                    self.error = Some(format!("{}: {msg}", self.t(L::MonitoringTaskFailed)));
+                }
+                DbEvt::CellBlocked {
+                    cell_layer_id,
+                    cell_id,
+                    blocked,
+                } => {
+                    if self.monitoring.selected_cell_layer.as_deref()
+                        == Some(cell_layer_id.as_str())
+                    {
+                        self.monitoring.set_cell_blocked(&cell_id, blocked);
+                        self.refresh_monitoring_overlay();
+                        self.request_area();
+                    }
+                }
+                DbEvt::ExchangeDone {
+                    mode,
+                    path,
+                    message,
+                } => {
+                    self.monitoring.exchange_busy = false;
+                    let label = match mode {
+                        ExchangeMode::Export => self.t(L::MonitoringExchangeExport),
+                        ExchangeMode::Import => self.t(L::MonitoringExchangeImport),
+                    };
+                    self.info = Some(format!("{label}: {message}"));
+                    if !path.is_empty() {
+                        self.remember_recent_file(std::path::Path::new(&path));
+                    }
+                }
+                DbEvt::ExchangeFailed { mode, message } => {
+                    self.monitoring.exchange_busy = false;
+                    let label = match mode {
+                        ExchangeMode::Export => self.t(L::MonitoringExchangeExport),
+                        ExchangeMode::Import => self.t(L::MonitoringExchangeImport),
+                    };
+                    self.error = Some(format!("{label}: {message}"));
+                }
+                // ---- Fase 5b: preparo do fluxo pela GUI (B1) -----------
+                DbEvt::PhaseCreated(phase) => {
+                    self.monitoring.new_phase_name.clear();
+                    self.monitoring.new_phase_description.clear();
+                    self.info = Some(format!(
+                        "{}: {}",
+                        self.t(L::MonitoringPhaseCreated),
+                        phase.name
+                    ));
+                    self.request_monitoring();
+                }
+                DbEvt::AoiLinked { aoi_id, layer_name } => {
+                    self.monitoring.selected_aoi = Some(aoi_id);
+                    self.info = Some(format!("{}: {layer_name}", self.t(L::MonitoringAoiLinked)));
+                    self.request_monitoring();
+                }
+                DbEvt::GridCreated {
+                    layer_id,
+                    name,
+                    resolution,
+                    srid,
+                    cells,
+                } => {
+                    self.monitoring.grid_cells = Some(cells);
+                    self.monitoring.selected_cell_layer = Some(layer_id);
+                    self.info = Some(format!(
+                        "{}: {name} — {cells} {} · {resolution} · EPSG:{srid}",
+                        self.t(L::MonitoringGridCreated),
+                        self.t(L::MonitoringTaskCells)
+                    ));
+                    self.request_monitoring();
+                }
+                DbEvt::RulesetActivated { name, version } => {
+                    self.info = Some(format!(
+                        "{}: {name} v{version}",
+                        self.t(L::MonitoringRulesetActivated)
+                    ));
+                    self.request_monitoring();
+                }
+                DbEvt::MeasuresImported(report) => {
+                    self.info = Some(format!(
+                        "{}: {} {} · {} {} · {} {}",
+                        self.t(L::MonitoringMeasuresImported),
+                        report.read,
+                        self.t(L::MonitoringMeasuresRead),
+                        report.written,
+                        self.t(L::MonitoringMeasuresWritten),
+                        report.skipped,
+                        self.t(L::MonitoringMeasuresSkipped),
+                    ));
+                    self.monitoring.measures_report = Some(report);
+                }
+                DbEvt::TaskCancelled {
+                    task_id: _,
+                    done,
+                    already,
+                } => {
+                    self.monitoring.cancel_requested = true;
+                    self.info = Some(if already {
+                        format!("{} ({done})", self.t(L::MonitoringCancelAlready))
+                    } else {
+                        self.t(L::MonitoringCancelRequested).to_owned()
+                    });
+                }
+                DbEvt::CancelFailed(msg) => {
+                    self.monitoring.cancel_requested = false;
+                    self.error = Some(format!("{}: {msg}", self.t(L::MonitoringCancel)));
+                }
+                DbEvt::Failed(msg) => {
+                    self.clear_loading();
+                    self.error = Some(msg);
+                }
             }
         }
     }
@@ -1017,6 +1651,21 @@ impl TerraApp {
         };
         match self.state.edit_mode {
             EditMode::Navigate => {
+                // Fase 5b: célula do monitoramento tem prioridade no pick
+                // (o overlay é desenhado sobre as camadas vetoriais) — mas só
+                // com a janela aberta, o toggle ligado e um overlay ativo
+                // (M3). Fora disso o clique é pick de feição normal.
+                if self.monitoring.cell_pick_enabled() {
+                    if let Some(cell_id) = self.map.cell_at(world.0, world.1) {
+                        self.state.selection = None;
+                        self.attr_buffers.clear();
+                        self.monitoring.selected_cell = Some(cell_id);
+                        self.map
+                            .set_cell_selected(self.monitoring.selected_cell.as_deref());
+                        self.state.sync_map(&mut self.map);
+                        return;
+                    }
+                }
                 if let Some(uid) = self.map.pick(screen) {
                     self.state.selection = Some(crate::map_view::decode_feature_uid(uid));
                 } else {
@@ -1097,8 +1746,17 @@ impl TerraApp {
         if self.band_job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
+        // Task/exchange rodando no worker: drena eventos em ritmo baixo (o
+        // canal mpsc não acorda o egui).
+        if self.monitoring.task.is_running() || self.monitoring.exchange_busy {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        // Janela fechada: o overlay de células não fica no canvas (M3 — o
+        // clique volta a escolher feições normalmente).
+        if !self.monitoring.open && self.map.overlay().is_some() {
+            self.map.set_cell_overlay(None);
+        }
         self.handle_map_click();
-
         // Shell v0.2: menu completo → toolbars agrupadas → trilho de ícones
         // → camadas → inspetor → tabela → status → canvas → diálogos.
         crate::menus::menu_bar(ui, self);
@@ -1114,5 +1772,6 @@ impl TerraApp {
         crate::status_bar::status_bar(ui, self);
         panels::central_canvas(ui, self);
         dialogs(ui, self);
+        crate::monitoring::window(ui, self);
     }
 }

@@ -40,6 +40,7 @@
 
 use eframe::egui;
 use egui::{Color32, Id, LayerId, Order, Pos2, Rect, Sense, Vec2};
+use geo_types::Polygon;
 
 use ta_core::feature::{Feature, FeatureId};
 use ta_core::layer::{GeomType, Layer};
@@ -96,6 +97,31 @@ impl Bbox {
             max_y,
         }
     }
+}
+
+/// Contorno da AOI selecionada no canvas (amarelo-âmbar do tema).
+pub const AOI_OUTLINE: Color32 = Color32::from_rgb(0xF2, 0xC1, 0x4E);
+
+/// Uma célula da grade pronta para pintar (Fase 5b).
+///
+/// `fill` já vem resolvido pela UI ([`crate::monitoring::cell_fill`]): cor de
+/// `classes.color` ou cinza de bloqueio. O canvas não decide classificação.
+#[derive(Debug, Clone)]
+pub struct CellShape {
+    pub cell_id: String,
+    pub polygon: Polygon<f64>,
+    pub fill: Color32,
+    pub blocked: bool,
+}
+
+/// Overlay de monitoramento do canvas: contorno da AOI + células.
+#[derive(Debug, Clone, Default)]
+pub struct CellOverlay {
+    /// Contornos da AOI selecionada (EPSG:4674, polígonos das feições).
+    pub aoi: Vec<Polygon<f64>>,
+    pub cells: Vec<CellShape>,
+    /// Célula destacada (alvo de bloquear/desbloquear).
+    pub selected: Option<String>,
 }
 
 /// Contexto de render entregue à implementação de [`MapView`].
@@ -192,6 +218,8 @@ pub struct MapViewEgui {
     dragging: bool,
     /// Paleta por índice de camada (determinística entre frames).
     palette: [Color32; 6],
+    /// Overlay do monitoramento (AOI + células/classes) — Fase 5b.
+    cell_overlay: Option<CellOverlay>,
 }
 
 impl MapViewEgui {
@@ -209,6 +237,7 @@ impl MapViewEgui {
             cursor_world: None,
             dragging: false,
             palette: draw::default_palette(),
+            cell_overlay: None,
         }
     }
 
@@ -271,6 +300,36 @@ impl MapViewEgui {
     /// Seleção destacada no canvas (uid de pick).
     pub fn set_selection(&mut self, selection: Option<FeatureId>) {
         self.selection = selection;
+    }
+
+    /// Define o overlay de monitoramento (AOI + células); `None` limpa.
+    pub fn set_cell_overlay(&mut self, overlay: Option<CellOverlay>) {
+        self.cell_overlay = overlay;
+    }
+
+    /// Destaca uma célula do overlay (sem exigir remontar o vetor).
+    pub fn set_cell_selected(&mut self, cell_id: Option<&str>) {
+        if let Some(overlay) = &mut self.cell_overlay {
+            overlay.selected = cell_id.map(str::to_owned);
+        }
+    }
+
+    /// Célula do overlay sob o ponto de mundo (hit-test do polígono).
+    ///
+    /// A grade é regular e não sobrepõe células; devolve a primeira que
+    /// contém o ponto — `None` quando o clique cai fora da grade.
+    pub fn cell_at(&self, x: f64, y: f64) -> Option<String> {
+        let overlay = self.cell_overlay.as_ref()?;
+        overlay
+            .cells
+            .iter()
+            .find(|cell| crate::viewport::point_in_polygon(&cell.polygon, x, y))
+            .map(|cell| cell.cell_id.clone())
+    }
+
+    /// Overlay corrente (legenda/inspeção em testes).
+    pub fn overlay(&self) -> Option<&CellOverlay> {
+        self.cell_overlay.as_ref()
     }
 
     /// Zoom pelos botões da toolbar (+/−) — âncora no centro.
@@ -446,6 +505,27 @@ impl MapView for MapViewEgui {
                         selected,
                     },
                 );
+            }
+        }
+
+        // Overlay do monitoramento (Fase 5b): células coloridas/bloqueadas e,
+        // por cima, o contorno da AOI selecionada. O preenchimento já vem
+        // resolvido por `monitoring::cell_fill` — o canvas não decide classe.
+        if let Some(overlay) = &self.cell_overlay {
+            for cell in &overlay.cells {
+                let selected = overlay.selected.as_deref() == Some(cell.cell_id.as_str());
+                draw::draw_cell(
+                    &painter,
+                    rect,
+                    &self.viewport,
+                    &cell.polygon,
+                    cell.fill,
+                    cell.blocked,
+                    selected,
+                );
+            }
+            for poly in &overlay.aoi {
+                draw::draw_outline(&painter, rect, &self.viewport, poly, AOI_OUTLINE, 2.0);
             }
         }
 

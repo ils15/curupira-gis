@@ -88,6 +88,80 @@ pub enum FlowError {
     // --- área --------------------------------------------------------------
     /// Rascunho informado no relatório de área não existe no projeto.
     DraftNotFound { name: String, project_id: String },
+
+    // --- preparo do fluxo (Fase 5b: GUI e CLI no MESMO caminho) ------------
+    /// Nome de fase duplicado no projeto (`UNIQUE(project_id, name)`).
+    PhaseNameTaken { name: String },
+
+    /// Falha ao gravar a fase (erro do banco preservado).
+    PhaseCreate { name: String, source: ta_db::Error },
+
+    /// Fase inexistente (vinculada a AOI/grade).
+    PhaseNotFound(String),
+
+    /// Fase de outro projeto.
+    PhaseOtherProject { id: String, project_id: String },
+
+    /// Camada vetorial inexistente (AOI é uma camada existente).
+    LayerNotFound(String),
+
+    /// Camada vetorial de outro projeto.
+    LayerOtherProject { id: String, project_id: String },
+
+    /// Falha ao gravar o vínculo de AOI.
+    AoiCreate(ta_db::Error),
+
+    /// AOI (`aoi_layers.id`) inexistente.
+    AoiNotFound(String),
+
+    /// Falha ao ler as feições da camada de AOI.
+    AoiGeometry(ta_db::Error),
+
+    /// Camada de AOI sem nenhuma feição poligonal.
+    AoiNoPolygon,
+
+    /// Falha ao reprojetar a AOI para o SRS da grade.
+    AoiReproject { srid: i32, message: String },
+
+    /// Reprojeção devolveu geometria que não é `MultiPolygon`.
+    AoiReprojectUnexpected(String),
+
+    /// Teto de células do projeto (`projects.max_cells`) excedido.
+    MaxCellsExceeded { needed: u64, max: i32 },
+
+    /// Projeto inexistente (leitura de `projects`).
+    ProjectNotFound(String),
+
+    /// O motor puro (`ta-engine`) recusou a grade (resolução/AOI/teto).
+    GridEngine(String),
+
+    /// Nome de camada de células duplicado no projeto.
+    CellLayerNameTaken { name: String },
+
+    /// Falha ao criar a camada de células.
+    CellLayerCreate(ta_db::Error),
+
+    /// Falha nas escritas da grade (insert de células).
+    CellsInsert(ta_db::Error),
+
+    /// Falha de transação da grade (`step` = "iniciando transação"/"commit").
+    GridTransaction { step: &'static str, message: String },
+
+    /// Ruleset nome/versão inexistente no projeto (mensagem do `activate`).
+    RulesetNotInProject {
+        name: String,
+        version: Option<i32>,
+        project: String,
+    },
+
+    /// O ruleset sumiu entre a busca e a ativação.
+    RulesetVanished(String),
+
+    /// Falha ao ativar o ruleset.
+    RulesetActivate(ta_db::Error),
+
+    /// Falha ao ler o CSV de medidas (arquivo ausente/ilegível).
+    MeasuresCsv { path: String, message: String },
 }
 
 impl fmt::Display for FlowError {
@@ -183,6 +257,74 @@ impl fmt::Display for FlowError {
                     "rascunho `{name}` não existe no projeto `{project_id}`; veja `draft list`"
                 )
             }
+            FlowError::PhaseNameTaken { name } => write!(
+                f,
+                "já existe uma fase com o nome `{name}` neste projeto; escolha outro nome em --name"
+            ),
+            FlowError::PhaseCreate { name, source } => {
+                write!(f, "criar fase `{name}`: {source}")
+            }
+            FlowError::PhaseNotFound(id) => write!(f, "fase `{id}` não existe"),
+            FlowError::PhaseOtherProject { id, project_id } => write!(
+                f,
+                "fase `{id}` pertence a outro projeto ({project_id}); use uma fase deste projeto"
+            ),
+            FlowError::LayerNotFound(id) => write!(f, "camada `{id}` não existe"),
+            FlowError::LayerOtherProject { id, project_id } => {
+                write!(f, "camada `{id}` pertence a outro projeto ({project_id})")
+            }
+            FlowError::AoiCreate(source) => write!(f, "criar AOI: {source}"),
+            FlowError::AoiNotFound(id) => write!(f, "AOI `{id}` não existe"),
+            FlowError::AoiGeometry(source) => {
+                write!(f, "lendo a geometria da AOI: {source}")
+            }
+            FlowError::AoiNoPolygon => {
+                write!(f, "a AOI precisa de pelo menos uma feição poligonal")
+            }
+            FlowError::AoiReproject { srid, message } => {
+                write!(f, "reprojetando a AOI para EPSG:{srid}: {message}")
+            }
+            FlowError::AoiReprojectUnexpected(other) => {
+                write!(
+                    f,
+                    "reprojeção da AOI produziu geometria inesperada: {other}"
+                )
+            }
+            FlowError::MaxCellsExceeded { needed, max } => write!(
+                f,
+                "grade grande demais para o projeto: {needed} células candidatas \
+                 excedem max_cells={max} (aumente max_cells ou a resolução)"
+            ),
+            FlowError::ProjectNotFound(id) => write!(f, "projeto `{id}` não existe"),
+            FlowError::GridEngine(message) => write!(f, "{message}"),
+            FlowError::CellLayerNameTaken { name } => write!(
+                f,
+                "já existe uma camada de células com o nome `{name}` neste projeto; \
+                 escolha outro nome em --name"
+            ),
+            FlowError::CellLayerCreate(source) => {
+                write!(f, "criando camada de células: {source}")
+            }
+            FlowError::CellsInsert(source) => write!(f, "gravando células: {source}"),
+            FlowError::GridTransaction { step, message } => write!(f, "{step}: {message}"),
+            FlowError::RulesetNotInProject {
+                name,
+                version,
+                project,
+            } => write!(
+                f,
+                "ruleset `{name}`{} não existe no projeto `{project}`; crie com `ruleset create`",
+                version
+                    .map(|v| format!(" (versão {v})"))
+                    .unwrap_or_default()
+            ),
+            FlowError::RulesetVanished(id) => {
+                write!(f, "ruleset `{id}` sumiu durante a ativação")
+            }
+            FlowError::RulesetActivate(source) => write!(f, "ativar ruleset: {source}"),
+            FlowError::MeasuresCsv { path, message } => {
+                write!(f, "lendo `{path}`: {message}")
+            }
         }
     }
 }
@@ -200,6 +342,12 @@ impl std::error::Error for FlowError {
 impl From<ta_db::Error> for FlowError {
     fn from(err: ta_db::Error) -> Self {
         FlowError::Db(err)
+    }
+}
+
+impl From<ta_db::sqlx::Error> for FlowError {
+    fn from(err: ta_db::sqlx::Error) -> Self {
+        FlowError::Db(err.into())
     }
 }
 

@@ -20,7 +20,7 @@
 //! 4674, nenhuma transformação é aplicada (evita round-trip desnecessário).
 
 use async_trait::async_trait;
-use geo_types::Geometry;
+use geo_types::{Geometry, Polygon};
 use sqlx::PgPool;
 use sqlx::Postgres;
 use sqlx::postgres::PgConnection;
@@ -75,6 +75,29 @@ pub trait BlockedCellRepo: Send + Sync {
     /// atual (só `block`/`list`). API mantida.
     async fn unblock(&self, cell_layer_id: &str, cell_id: &str) -> Result<bool>;
 }
+
+/// Linha de célula pronta para o **canvas** (consulta por viewport).
+///
+/// É uma leitura de apresentação: a decisão de classe vem do rascunho
+/// selecionado (`draft_cells`) e o bloqueio de `blocked_cells` — nenhuma
+/// regra de classificação/área é calculada aqui, só o vínculo já persistido.
+/// `class_id: None` = célula ainda sem decisão (ou nenhum rascunho escolhido).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CellViewRow {
+    /// Identificador determinístico da célula (`"<col>_<row>"`).
+    pub cell_id: String,
+    /// Polígono em EPSG:4674 (armazenamento canônico das células).
+    pub geom: Polygon<f64>,
+    /// Classe decidida no rascunho consultado (`None` = sem decisão).
+    pub class_id: Option<String>,
+    /// A célula está em `blocked_cells` (bloqueio tem precedência visual).
+    pub blocked: bool,
+}
+
+/// Teto da consulta de viewport do canvas — um LIMIT explícito evita
+/// materializar uma grade de 1M de células num zoom-out; o chamador mostra o
+/// aviso de truncamento quando `truncated` volta `true`.
+pub const MAX_VIEWPORT_CELLS: i64 = 5_000;
 
 type CellLayerRow = (
     String,               // id
@@ -195,9 +218,102 @@ pub struct PgCellRepo {
 /// Tamanho do lote do `INSERT … UNNEST` (mesmo racional do fallback de features).
 const CHUNK: usize = 1000;
 
+/// Decodifica o EWKB de uma célula e exige polígono em EPSG:4674 — o
+/// armazenamento é canônico; lixo no SRID/na geometria é erro acionável.
+fn polygon_from_ewkb(cell_id: &str, ewkb: &[u8]) -> Result<Polygon<f64>> {
+    let (geom, srid) = geo::from_ewkb(ewkb)?;
+    if let Some(srid) = srid {
+        if srid != TARGET_SRID {
+            return Err(ta_core::Error::SridMismatch {
+                expected: TARGET_SRID,
+                got: srid,
+            }
+            .into());
+        }
+    }
+    match geom {
+        Geometry::Polygon(p) => Ok(p),
+        other => Err(Error::Postgis(format!(
+            "célula {cell_id} não é polígono: {other:?}"
+        ))),
+    }
+}
+
 impl PgCellRepo {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Células que intersectam o **bbox da viewport** do canvas, com a classe
+    /// do rascunho `draft_layer_id` (opcional) e o flag de bloqueio.
+    ///
+    /// Leitura de apresentação (Fase 5b): filtra por `&&` no índice GIST e
+    /// devolve no máximo `limit` linhas (teto [`MAX_VIEWPORT_CELLS`]);
+    /// `truncated == true` significa "há mais células nesta viewport" — o
+    /// canvas avisa em vez de carregar a grade inteira. `draft_layer_id`
+    /// `None` lista as células sem decisão de classe (sem join útil).
+    pub async fn viewport_on(
+        &self,
+        cell_layer_id: &str,
+        draft_layer_id: Option<&str>,
+        bbox: [f64; 4],
+        limit: i64,
+    ) -> Result<(Vec<CellViewRow>, bool)> {
+        check_id(cell_layer_id)?;
+        if let Some(draft) = draft_layer_id {
+            check_id(draft)?;
+        }
+        let [min_x, min_y, max_x, max_y] = bbox;
+        if ![min_x, min_y, max_x, max_y].iter().all(|v| v.is_finite())
+            || min_x >= max_x
+            || min_y >= max_y
+        {
+            return Err(Error::Postgis(format!(
+                "bbox de viewport inválida ({min_x}, {min_y}, {max_x}, {max_y}); \
+                 esperado [min_x, min_y, max_x, max_y] finito e ordenado"
+            )));
+        }
+        let limit = limit.clamp(1, MAX_VIEWPORT_CELLS);
+        // `limit + 1` detecta truncamento sem uma segunda query de count.
+        let fetch = limit.saturating_add(1);
+        let rows: Vec<(String, Vec<u8>, Option<String>, bool)> = sqlx::query_as(
+            "SELECT c.cell_id, ST_AsEWKB(c.geom), dc.class_id::text, \
+                    (b.cell_id IS NOT NULL) \
+             FROM cells c \
+             LEFT JOIN blocked_cells b \
+                    ON b.cell_layer_id = c.cell_layer_id AND b.cell_id = c.cell_id \
+             LEFT JOIN draft_cells dc \
+                    ON dc.cell_layer_id = c.cell_layer_id AND dc.cell_id = c.cell_id \
+                   AND dc.draft_layer_id = $6::uuid \
+             WHERE c.cell_layer_id = $1::uuid \
+               AND c.geom && ST_MakeEnvelope($2::float8, $3::float8, $4::float8, $5::float8, 4674) \
+             ORDER BY c.row_index, c.col_index, c.cell_id \
+             LIMIT $7::int8",
+        )
+        .bind(cell_layer_id)
+        .bind(min_x)
+        .bind(min_y)
+        .bind(max_x)
+        .bind(max_y)
+        .bind(draft_layer_id)
+        .bind(fetch)
+        .fetch_all(&self.pool)
+        .await?;
+        let truncated = i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit;
+        let out = rows
+            .into_iter()
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .map(|(cell_id, ewkb, class_id, blocked)| {
+                let geom = polygon_from_ewkb(&cell_id, &ewkb)?;
+                Ok(CellViewRow {
+                    cell_id,
+                    geom,
+                    class_id,
+                    blocked,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((out, truncated))
     }
 
     /// `bulk_insert` sobre a **conexão** dada (de um pool ou de uma transação).
@@ -205,6 +321,13 @@ impl PgCellRepo {
     /// Loop em lotes de [`CHUNK`] reutilizando a mesma conexão — o executor é
     /// consumido por referência (`&mut PgConnection`), então a mesma conexão
     /// serve todos os lotes.
+    ///
+    /// **`ANALYZE` NÃO roda aqui**: a função pode estar dentro da transação do
+    /// chamador e `ANALYZE` antes do commit não enxerga as linhas novas (e
+    /// prenderia o lock de manutenção até o commit). O chamador roda
+    /// [`Self::analyze_cells_on`] **depois do commit** (`persist_grid`, import
+    /// do exchange, `bulk_insert` do trait) — sem estatísticas o planner varre
+    /// a camada (medido: 8,7 ms/11.754 buffers vs 0,45 ms/36 buffers).
     ///
     /// `srid` declara em que EPSG as geometrias de `cells` estão expressas e é
     /// **validado** contra `cell_layers.srid` (o SRS em que a grade foi
@@ -350,6 +473,35 @@ impl PgCellRepo {
         .await?;
         Ok(found)
     }
+
+    /// Ids das células da camada (`Set` para validação O(1) do import CSV de
+    /// medidas) — só a chave textual, sem geometria: um CSV de milhares de
+    /// linhas não justifica materializar os polígonos.
+    pub async fn cell_ids(&self, cell_layer_id: &str) -> Result<std::collections::HashSet<String>> {
+        check_id(cell_layer_id)?;
+        let ids: Vec<String> =
+            sqlx::query_scalar("SELECT cell_id FROM cells WHERE cell_layer_id = $1::uuid")
+                .bind(cell_layer_id)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(ids.into_iter().collect())
+    }
+
+    /// Atualiza as estatísticas do planner para `cells` (`ANALYZE`).
+    ///
+    /// Roda **depois do commit** de um insert em lote: o planejador decide
+    /// entre varredura sequencial e índice pelo `reltuples`/histogramas, e uma
+    /// grade recém-gravada sem estatísticas faz a consulta de viewport varrer
+    /// a camada inteira (medido: 8,7 ms/11.754 buffers vs 0,45 ms/36). É
+    /// best-effort no chamador pós-commit: a gravação já está durável, então
+    /// uma falha aqui não pode desfazer o insert.
+    pub async fn analyze_cells_on<'e, E>(exec: E) -> Result<()>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        sqlx::query("ANALYZE cells").execute(exec).await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -361,6 +513,11 @@ impl CellRepo for PgCellRepo {
         let mut tx = self.pool.begin().await?;
         let inserted = Self::bulk_insert_on(&mut tx, cell_layer_id, cells, srid).await?;
         tx.commit().await?;
+        // Estatísticas do planner APÓS o commit (ver `analyze_cells_on`):
+        // sem isso a viewport varre a camada em vez de usar o GIST.
+        if inserted > 0 {
+            Self::analyze_cells_on(&self.pool).await?;
+        }
         Ok(inserted)
     }
 
@@ -379,24 +536,7 @@ impl CellRepo for PgCellRepo {
         .await?;
         let mut out = Vec::with_capacity(rows.len());
         for (id, cell_id, ewkb, row_index, col_index) in rows {
-            let (geom, srid) = geo::from_ewkb(&ewkb)?;
-            if let Some(srid) = srid {
-                if srid != TARGET_SRID {
-                    return Err(ta_core::Error::SridMismatch {
-                        expected: TARGET_SRID,
-                        got: srid,
-                    }
-                    .into());
-                }
-            }
-            let geom = match geom {
-                Geometry::Polygon(p) => p,
-                other => {
-                    return Err(Error::Postgis(format!(
-                        "célula {cell_id} não é polígono: {other:?}"
-                    )));
-                }
-            };
+            let geom = polygon_from_ewkb(&cell_id, &ewkb)?;
             out.push(Cell {
                 id,
                 cell_layer_id: cell_layer_id.to_owned(),

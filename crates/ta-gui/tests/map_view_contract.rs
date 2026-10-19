@@ -173,3 +173,63 @@ fn pick_da_feature_certa_apos_render_headless() {
     let (fx, fy) = view.viewport().world_to_screen(4.5, 0.5);
     assert_eq!(view.pick((fx, fy)), None);
 }
+
+/// Contrato de renderização do overlay (Fase 5b), sem snapshot gráfico:
+/// cor de classe vem de `classes.color`, bloqueio tem precedência e o pick
+/// do canvas devolve a célula certa (base do "clicar para bloquear").
+#[test]
+fn overlay_colorido_por_classe_e_bloqueio_e_pick_da_celula() {
+    use geo_types::{LineString, Polygon};
+    use ta_core::classification::Class;
+    use ta_db::repo_cell::CellViewRow;
+    use ta_gui::monitoring::{BLOCKED_FILL, UNCLASSIFIED_FILL, overlay};
+
+    fn cell(id: &str, min_x: f64, class: Option<&str>, blocked: bool) -> CellViewRow {
+        CellViewRow {
+            cell_id: id.to_owned(),
+            geom: Polygon::new(
+                LineString::from(vec![
+                    (min_x, 0.0),
+                    (min_x + 1.0, 0.0),
+                    (min_x + 1.0, 1.0),
+                    (min_x, 1.0),
+                    (min_x, 0.0),
+                ]),
+                vec![],
+            ),
+            class_id: class.map(str::to_owned),
+            blocked,
+        }
+    }
+
+    let mut class = Class::new("p1", "floresta");
+    class.id = "floresta".into();
+    let class = class.with_color(Some("#12AB34"));
+    let cells = vec![
+        cell("0_0", 0.0, Some("floresta"), false),
+        cell("1_0", 1.0, Some("floresta"), true),
+        cell("2_0", 2.0, None, false),
+    ];
+    let ov = overlay(
+        &cells,
+        std::slice::from_ref(&class),
+        Vec::new(),
+        Some("1_0"),
+    );
+
+    assert_eq!(ov.cells[0].fill, ta_gui::monitoring::class_fill(&class));
+    assert_eq!(ov.cells[1].fill, BLOCKED_FILL, "bloqueio vence a classe");
+    assert_eq!(ov.cells[2].fill, UNCLASSIFIED_FILL);
+    assert!(ov.cells[1].blocked);
+    assert_eq!(ov.selected.as_deref(), Some("1_0"));
+
+    let mut view = MapViewEgui::new();
+    view.set_cell_overlay(Some(ov));
+    assert_eq!(view.cell_at(0.5, 0.5).as_deref(), Some("0_0"));
+    assert_eq!(
+        view.cell_at(1.5, 0.5).as_deref(),
+        Some("1_0"),
+        "célula bloqueada continua clicável (desbloquear)"
+    );
+    assert_eq!(view.cell_at(9.0, 9.0), None);
+}

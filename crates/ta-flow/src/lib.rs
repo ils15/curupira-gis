@@ -13,14 +13,25 @@
 //! - [`area`]: relatório de área consolidado (Decisão 4) — SRS métrico de
 //!   `area_settings.srs_id` (default EPSG:5880), NUNCA em graus; totais,
 //!   por classe (rascunho) e por célula.
+//! - **Preparo do fluxo** (Fase 5b): [`phase`], [`aoi`], [`grid`], [`ruleset`]
+//!   e [`measures`] — as ações que a CLI exponha em `phase`/`aoi`/`grid`/
+//!   `ruleset`/`measure` e a GUI expõe no painel Monitoramento. A regra de
+//!   domínio (unicidade, validação, transação, `max_cells`, `ANALYZE`) mora
+//!   aqui: a GUI **não** reimplementa nada, e a CLI vira parse + formatação.
 //!
 //! Dependências deliberadas (ver `Cargo.toml`): `ta-core`, `ta-db`,
-//! `ta-engine` — tipos de conexão via re-export `ta_db::sqlx`. Erros tipados
-//! ([`FlowError`]); as mensagens de erro reproduzem EXATAMENTE as da CLI da
-//! fila (a Fase 5b consome este crate; a saída visível não muda).
+//! `ta-engine` (+ `time` para o instante das medidas) — tipos de conexão via
+//! re-export `ta_db::sqlx`. Erros tipados ([`FlowError`]); as mensagens de
+//! erro reproduzem EXATAMENTE as da CLI (a Fase 5b consome este crate; a saída
+//! visível não muda).
 
+pub mod aoi;
 pub mod area;
 pub mod error;
+pub mod grid;
+pub mod measures;
+pub mod phase;
 pub mod queue;
+pub mod ruleset;
 
 pub use error::FlowError;

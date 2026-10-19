@@ -443,6 +443,24 @@ async fn srs_para_area_e_validado() {
         "erro de SRS geográfico, obtido: {err}"
     );
 
+    // m8: SRS em PÉS (2263, US survey foot) não é métrico — m² rotulado
+    // errado seria erro silencioso de unidade.
+    let err = repo
+        .area_summary_on(&grid_id, 2263)
+        .await
+        .expect_err("SRS em pés é recusado (área seria m² rotulado errado)");
+    assert!(
+        matches!(
+            &err,
+            ta_db::Error::NonMetricSridForArea { srs: 2263, units } if !units.eq_ignore_ascii_case("metros")
+        ),
+        "erro de SRS não métrico, obtido: {err}"
+    );
+    assert!(
+        err.to_string().contains("não metros"),
+        "mensagem acionável cita as unidades: {err}"
+    );
+
     cleanup(&pool, &project.id).await;
     pool.close().await;
 }

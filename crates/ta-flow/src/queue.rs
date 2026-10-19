@@ -239,11 +239,14 @@ pub enum RunOutcome {
 /// `pending`; rodar de novo retoma — nenhum `done` é reprocessado). Eventos de
 /// progresso saem por `on_event` (entre o claim e o commit do lote NADA é
 /// emitido: só sucesso commitado vira evento).
+///
+/// O callback exige `Send`: a GUI roda o run em `rt.spawn` (multi-thread) e o
+/// futuro carrega o `&mut` do callback entre pontos de await.
 pub async fn run_task(
     pool: &PgPool,
     task_id: &str,
     limit: Option<u64>,
-    on_event: &mut dyn FnMut(RunEvent),
+    on_event: &mut (dyn FnMut(RunEvent) + Send),
 ) -> Result<RunOutcome, FlowError> {
     let tasks = PgTaskRepo::new(pool.clone());
     let task = tasks

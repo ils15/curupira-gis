@@ -224,6 +224,32 @@ ta-cli cell list-blocked --cell-layer <UUID cell_layers>
 ta-cli area report --cell-layer <UUID cell_layers> --draft <nome do rascunho> --json
 ```
 
+### Janela Monitoramento (GUI)
+
+`Ferramentas → Monitoramento` executa o MESMO fluxo da CLI sem sair do app: a
+janela **orquestra** `ta-flow` (fase, AOI, grade, ativação de ruleset, import de
+medidas, fila e área) e não reimplementa regra de domínio.
+
+- **Fase**: nome + descrição → “Criar fase”.
+- **AOI**: escolha a camada poligonal e, opcionalmente, a coluna de id →
+  “Vincular AOI”.
+- **Grade**: selecione a AOI na lista, informe nome/resolução/EPSG → “Gerar
+  grade”; resolução e origem são expressas no EPSG informado (graus em 4674,
+  metros em 5880) e as células ficam em EPSG:4674.
+- **Ruleset**: escolha nome/versão e “Ativar selecionado” — o ativo é o default
+  do “Classificar”.
+- **Medidas**: CSV LONG `cell_id,measure,value[,scene]` → “Importar medidas”;
+  linhas inválidas aparecem como ignoradas (com motivo) e reimportar é
+  idempotente.
+- **Classificar**: cria e roda a task no worker (a UI segue responsiva);
+  “Cancelar” pede cancelamento cooperativo — a task para entre lotes e os
+  processos já concluídos permanecem.
+- **Células**: “Selecionar células no mapa” liga o pick de célula (só com a
+  janela aberta); clique bloqueia/desbloqueia. A viewport consulta por bbox com
+  15% de margem e LIMIT de 5.000 no servidor (aviso visível quando trunca).
+- **Exchange**: export/import rodam o binário `ta-cli` (mesma validação); o DSN
+  vai por ambiente, nunca na linha de comando.
+
 **Unidades por SRS:** `--resolution`, `--origin-x` e `--origin-y` são expressos
 no SRS de `--srid` — graus se geográfico (4674), metros se projetado (5880). As
 células são **sempre persistidas em EPSG:4674** (armazenamento canônico); por

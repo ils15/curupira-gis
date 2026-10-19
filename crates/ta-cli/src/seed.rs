@@ -107,7 +107,7 @@ pub async fn run(args: SeedArgs) -> Result<(), String> {
     }
     // Catálogo das classes no JSONB da AOI (a tabela `classes` é da Fase 2).
     annotate_aoi(&mut aoi_data.features, &classes, &args.aoi);
-    let area = crate::flow::multipolygon_from_features(&aoi_data.features)
+    let area = ta_flow::grid::multipolygon_from_features(&aoi_data.features)
         .map_err(|e| format!("{}: {e}", args.aoi.display()))?;
 
     let pool = crate::open_pool(args.dsn.as_deref()).await?;
@@ -295,8 +295,10 @@ async fn ensure_grid(
             });
         }
         // Mesma política de projeto do `grid create` (o caminho do seed incluído).
-        crate::flow::enforce_max_cells(pool, project_id, area, &spec).await?;
-        let generated = crate::flow::generate_cells(area, &spec)?;
+        ta_flow::grid::ensure_max_cells(pool, project_id, area, &spec)
+            .await
+            .map_err(|e| e.to_string())?;
+        let generated = ta_flow::grid::generate_cells(area, &spec).map_err(|e| e.to_string())?;
         let inserted = cells
             .bulk_insert(&existing.id, &generated, spec.srid)
             .await
@@ -311,8 +313,9 @@ async fn ensure_grid(
     }
 
     let (layer, inserted) =
-        crate::flow::persist_grid(pool, project_id, aoi_layer_id, GRID_NAME, &spec, area, None)
-            .await?;
+        ta_flow::grid::persist_grid(pool, project_id, aoi_layer_id, GRID_NAME, &spec, area, None)
+            .await
+            .map_err(|e| e.to_string())?;
     // `inserted` pode ser menor que o total (`ON CONFLICT DO NOTHING`); o
     // relatório mostra o que **existe** na camada após a execução.
     let count = cells.count(&layer.id).await.map_err(|e| e.to_string())?;

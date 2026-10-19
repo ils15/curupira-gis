@@ -708,6 +708,29 @@ static ALL: &[Command] = &[
         toggle: None,
         run: |app, _| app.open_processing(ProcKind::Union),
     },
+    // ---- Monitoramento (Fase 5b) --------------------------------------------
+    Command {
+        id: "monitoring.open",
+        label: L::MonitoringTitle,
+        category: Category::Tools,
+        shortcut: None,
+        sep: true,
+        visible: vis_tools,
+        guard: needs_db_project,
+        toggle: None,
+        run: |app, _| app.open_monitoring(),
+    },
+    Command {
+        id: "monitoring.classify",
+        label: L::MonitoringClassify,
+        category: Category::Tools,
+        shortcut: None,
+        sep: false,
+        visible: vis_tools,
+        guard: needs_db_project,
+        toggle: None,
+        run: |app, _| app.classify_selected(),
+    },
     // ---- Ajuda -------------------------------------------------------------------
     Command {
         id: "help.shortcuts",

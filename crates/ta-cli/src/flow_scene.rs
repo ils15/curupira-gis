@@ -75,7 +75,7 @@ fn footprint_from_arg(arg: &str) -> Result<geo_types::MultiPolygon<f64>, String>
              use POLYGON/MULTIPOLYGON em EPSG:4674"
         )
     })?;
-    crate::flow::multipolygon_from_features(&data.features)
+    ta_flow::grid::multipolygon_from_features(&data.features).map_err(|e| e.to_string())
 }
 
 /// `scene add` — registra uma cena (global; nome é único).

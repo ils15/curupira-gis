@@ -32,14 +32,19 @@ use crate::{Error, Result};
 pub const MAX_CELLS_EXPORT: i64 = 10_000;
 
 /// Valida o SRS de CÁLCULO DE ÁREA: precisa existir em `spatial_ref_sys`
-/// (senão `Error::UnknownSrid`) e ser métrico — SRS geográfico (graus) é
-/// rejeitado com `Error::GeographicSridForArea` (Decisão 4: área nunca em
-/// graus). Reutiliza a classificação de unidades do PostGIS (`srid_units`),
-/// que já dá a mensagem acionável do EPSG desconhecido.
+/// (senão `Error::UnknownSrid`) e ser **métrico em metros** — SRS geográfico
+/// (graus) é rejeitado com `Error::GeographicSridForArea` (Decisão 4: área
+/// nunca em graus) e SRS em outra unidade linear (ex.: pés, EPSG:2263) com
+/// `Error::NonMetricSridForArea` (área é reportada em m²; pés² rotulado m² é
+/// erro de unidade silencioso). Reutiliza a classificação de unidades do
+/// PostGIS (`srid_units`), que já dá a mensagem acionável do EPSG desconhecido.
 pub async fn ensure_metric_srs(pool: &PgPool, srs: i32) -> Result<()> {
     let units = srid_units(pool, srs).await?;
     if units == "graus" {
         return Err(Error::GeographicSridForArea(srs));
+    }
+    if units != "metros" {
+        return Err(Error::NonMetricSridForArea { srs, units });
     }
     Ok(())
 }

@@ -14,9 +14,11 @@ geo-types.workspace = true
 thiserror.workspace = true
 time.workspace = true
 serde_json.workspace = true
-# Macros query! ficam DESLIGADAS de propósito (risco R2: sem DATABASE_URL em
-# build) — só API runtime (sqlx::query / raw_sql / Migrator).
-sqlx = { workspace = true, features = ["time", "json", "migrate"] }
+# Macros `query!` ficam DESLIGADAS de propósito (risco R2: sem DATABASE_URL em
+# build). `macros` aqui habilita SOMENTE `sqlx::migrate!`, que embute os
+# arquivos de migração no binário em tempo de compilação (os dados empacotados
+# funcionam fora do checkout de build) e não consulta banco no build.
+sqlx = { workspace = true, features = ["time", "json", "migrate", "macros"] }
 
 rusqlite = { workspace = true, optional = true }
 

@@ -8,20 +8,23 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-# Decisão da Fase 5a: o executor depende de core (tipos), db (repositórios) e
-# engine (motor puro de classificação) — e nada mais. Os tipos de conexão
+# Decisão da Fase 5a (ampliada na 5b): o executor depende de core (tipos), db
+# (repositórios), engine (motor puro de classificação) e dos tipos de
+# geometria/tempo usados pelo domínio — e nada mais. Os tipos de conexão
 # (`PgPool`, `PgConnection`) vêm do re-export `ta_db::sqlx` e os erros tipados
-# têm impl manual (sem thiserror), então o `cargo tree -p ta-flow -e normal`
-# mostra SÓ core/db/engine. Sem GUI, sem CLI/clap; o runtime async é do
+# têm impl manual (sem thiserror). Sem GUI, sem CLI/clap; o runtime async é do
 # chamador (CLI tokio, GUI eframe/tokio).
 ta-core.workspace = true
 ta-db.workspace = true
 ta-engine.workspace = true
+# `MultiPolygon`/`Geometry` da AOI e das células (tipos do domínio).
+geo-types.workspace = true
+# Instante das medidas (`cell_measures.updated_on`) no import CSV — mesmo tipo
+# do `ta-core` (feature `serde-well-known` já habilitada no workspace).
+time.workspace = true
 
 [dev-dependencies]
 # #[tokio::test] dos testes gated (o runtime de produção é do chamador).
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-# Montagem do fixture dos testes gated (grade + features + timestamps).
-geo-types.workspace = true
+# Montagem do fixture dos testes gated (features).
 serde_json.workspace = true
-time.workspace = true

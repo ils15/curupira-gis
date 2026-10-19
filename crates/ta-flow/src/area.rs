@@ -47,11 +47,11 @@ pub async fn report(
     let srs = srs_override.unwrap_or(settings.srs_id);
     // Validação antecipada: EPSG inexistente → UnknownSrid (acionável, vindo
     // de srid_units); SRS geográfico → GeographicSridForArea (área nunca em
-    // graus). O repositório revalida antes de cada query (defesa no dado).
+    // graus); SRS em pés (ex.: 2263) → NonMetricSridForArea (m² rotulado errado
+    // seria erro silencioso de unidade). O repositório revalida antes de cada
+    // query (defesa no dado).
+    ta_db::repo_area::ensure_metric_srs(pool, srs).await?;
     let srs_units = srid_units(pool, srs).await?;
-    if srs_units == "graus" {
-        return Err(FlowError::Db(ta_db::Error::GeographicSridForArea(srs)));
-    }
 
     let areas = PgAreaRepo::new(pool.clone());
     let summary = areas.area_summary_on(&layer.id, srs).await?;

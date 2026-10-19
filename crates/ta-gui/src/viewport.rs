@@ -12,7 +12,7 @@
 //!   p/ baixo);
 //! - escala = pixels por unidade de mundo (`px_per_unit`).
 
-use geo_types::{Coord, Geometry, LineString};
+use geo_types::{Coord, Geometry, LineString, Polygon};
 
 use crate::map_view::Bbox;
 
@@ -290,6 +290,14 @@ pub fn bbox_of_geoms<'a>(geoms: impl Iterator<Item = &'a Geometry<f64>>) -> Opti
         }
     }
     acc
+}
+
+/// O ponto de mundo `(x, y)` está dentro do polígono (exterior menos buracos)?
+///
+/// Usado pelo canvas para achar a célula clicada sem alocar uma
+/// `Geometry` por célula (a grade pode ter milhares de células na viewport).
+pub fn point_in_polygon(poly: &Polygon<f64>, x: f64, y: f64) -> bool {
+    point_in_ring(poly.exterior(), x, y) && !poly.interiors().iter().any(|r| point_in_ring(r, x, y))
 }
 
 /// Hit-test de pick: o ponto de mundo `(x, y)` está sobre a geometria,

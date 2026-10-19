@@ -554,6 +554,18 @@ pub(crate) async fn exchange_import(
     match import_sections(&mut tx, &created.id, &doc).await {
         Ok((counts, warnings)) => {
             tx.commit().await.map_err(tx_err)?;
+            // Estatísticas do planner DEPOIS do commit (M5): o insert de
+            // células entra numa transação única e o ANALYZE não pode vê-las
+            // antes do commit. Best-effort com aviso — o import já está
+            // gravado e o autovacuum acaba coletando as estatísticas.
+            if counts.cells > 0 {
+                if let Err(e) = PgCellRepo::analyze_cells_on(&pool).await {
+                    println!(
+                        "aviso: ANALYZE cells não executou ({e}); a viewport pode \
+                         ficar mais lenta até o autovacuum coletar estatísticas"
+                    );
+                }
+            }
             println!(
                 "exchange importado: projeto `{into}` ({})\n\
                  fases={}\taoi={}\tfeatures={}\tgrades={}\tcelulas={}\tbloqueadas={}\n\

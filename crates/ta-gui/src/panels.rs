@@ -419,6 +419,9 @@ pub fn central_canvas(ui: &mut egui::Ui, app: &mut TerraApp) {
             viewport_px: (rect.width(), rect.height()),
         };
         app.map.render(&mut rctx);
+        // Fase 5b: consulta as células da viewport corrente (tolerância de
+        // pan/zoom; troca de grade/rascunho força) — o worker responde.
+        app.request_cell_view(false);
         // Overlays de UI (grade + barra de escala) — desenhados sobre o
         // mapa pelo painter do egui, sem tocar no contrato MapView.
         let painter = ui.painter_at(rect);
@@ -428,6 +431,9 @@ pub fn central_canvas(ui: &mut egui::Ui, app: &mut TerraApp) {
         if app.state.scale_bar_on {
             draw_scale_bar(&painter, app, rect);
         }
+        // Legenda das classes/bloqueio do monitoramento (derivada das
+        // células VISÍVEIS; sem entradas mortas).
+        crate::monitoring::draw_legend(&painter, app, rect);
         // Garante que o painel reserve a área (evita layout oscilante).
         ui.allocate_exact_size(rect.size(), Sense::hover());
     });

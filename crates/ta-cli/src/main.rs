@@ -946,6 +946,21 @@ enum MeasureCmd {
         #[arg(long)]
         dsn: Option<String>,
     },
+    /// Importa medidas de um CSV LONG (`cell_id,measure,value[,scene]`).
+    ///
+    /// Mesmo caminho da GUI (`ta_flow::measures::import_csv`): valida número
+    /// finito, célula da grade e cena existente; linhas inválidas são
+    /// IGNORADAS com motivo (o relatório mostra lidas/gravadas/ignoradas).
+    ImportCsv {
+        /// Id (UUID) da camada de células.
+        #[arg(long)]
+        cell_layer: String,
+        /// Caminho do CSV (cabeçalho opcional; vírgula, sem aspas).
+        #[arg(long)]
+        input: String,
+        #[arg(long)]
+        dsn: Option<String>,
+    },
 }
 
 /// Subcomandos de `task`.
@@ -1411,6 +1426,11 @@ async fn main() -> ExitCode {
                 cell_id,
                 dsn,
             } => flow_task::measure_clear(dsn.as_deref(), &cell_layer, cell_id.as_deref()).await,
+            MeasureCmd::ImportCsv {
+                cell_layer,
+                input,
+                dsn,
+            } => flow_task::measure_import_csv(dsn.as_deref(), &cell_layer, &input).await,
         },
         Cmd::Task { cmd } => match cmd {
             TaskCmd::Create {

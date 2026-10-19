@@ -1,34 +1,32 @@
 //! Subcomandos do **fluxo de monitoramento** (Fase 1): fase, AOI, grade de
 //! células e células bloqueadas.
 //!
-//! O cálculo da grade é **delegado ao motor puro** `ta-engine` (sem IO/DB); aqui
-//! ficam só a leitura/gravação no banco (via `ta-db`, bind-only) e a costura
-//! transacional. Erros chegam à CLI como texto acionável.
+//! **Camada fina (Fase 5b):** a regra de domínio do preparo (fase, AOI, grade,
+//! ativação de ruleset e import de medidas) mora em `ta-flow` — a MESMA que o
+//! painel Monitoramento da GUI usa. Aqui ficam só o parse (clap), a resolução
+//! de projeto por id/nome e a formatação das linhas de saída (inalteradas).
+//! O cálculo da grade continua **delegado ao motor puro** `ta-engine` (via
+//! `ta_flow::grid`), sem IO na GUI nem lógica duplicada na CLI.
 
-use geo_types::{Geometry, MultiPolygon, Polygon};
 use sqlx::PgPool;
-use ta_core::aoi::AoiLayer;
-use ta_core::cell::{BlockedCell, Cell, CellLayer, GridSpec};
+use ta_core::cell::BlockedCell;
 use ta_core::classification::{Class, ClassGroup, DraftLayer};
-use ta_core::feature::Feature;
-use ta_core::phase::Phase;
 use ta_core::rule::{Rule, RuleSet};
-use ta_db::repo::{FeatureRepo, LayerRepo, PgFeatureRepo, PgLayerRepo, PgProjectRepo, ProjectRepo};
-use ta_db::repo_aoi::{AoiLayerRepo, PgAoiLayerRepo};
+use ta_db::repo::{PgProjectRepo, ProjectRepo};
 use ta_db::repo_cell::{
     BlockedCellRepo, CellLayerRepo, CellRepo, PgBlockedCellRepo, PgCellLayerRepo, PgCellRepo,
 };
 use ta_db::repo_class::{
     ClassGroupRepo, ClassRepo, DraftLayerRepo, PgClassGroupRepo, PgClassRepo, PgDraftLayerRepo,
 };
-use ta_db::repo_phase::{PgPhaseRepo, PhaseRepo};
 use ta_db::repo_ruleset::{PgRuleRepo, PgRuleSetRepo, RulePatch, RuleRepo, RuleSetRepo};
-use ta_db::spatial::{TARGET_SRID, srid_units, transform_geometry};
-use ta_engine::{aoi_bbox, candidate_count, evaluate, generate_grid, parse_predicate};
+use ta_db::spatial::srid_units;
+use ta_engine::{evaluate, parse_predicate};
+use ta_flow::{aoi as flow_aoi, grid as flow_grid, phase as flow_phase};
 
 use crate::resolve_project;
 
-/// `phase create` — cria uma fase no projeto.
+/// `phase create` — cria uma fase no projeto (`ta_flow::phase::create`).
 pub async fn phase_create(
     dsn: Option<&str>,
     project: &str,
@@ -39,15 +37,16 @@ pub async fn phase_create(
 ) -> Result<(), String> {
     let pool = crate::open_pool(dsn).await?;
     let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
-    let mut phase = Phase::new(&project.id, name);
-    phase.description = description.unwrap_or_default();
-    phase.sort_order = sort_order;
-    phase.cell_blocker = cell_blocker;
-
-    let saved = PgPhaseRepo::new(pool.clone())
-        .create(&phase)
-        .await
-        .map_err(|e| phase_create_error(&e, name))?;
+    let saved = flow_phase::create(
+        &pool,
+        &project.id,
+        name,
+        description.unwrap_or_default(),
+        sort_order,
+        cell_blocker,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     println!(
         "fase criada: {}\tprojeto={}\tbloqueia_celulas={}",
         saved.id, project.name, saved.cell_blocker
@@ -58,6 +57,7 @@ pub async fn phase_create(
 
 /// `phase list` — lista as fases do projeto (ordem de exibição).
 pub async fn phase_list(dsn: Option<&str>, project: &str) -> Result<(), String> {
+    use ta_db::repo_phase::{PgPhaseRepo, PhaseRepo};
     let pool = crate::open_pool(dsn).await?;
     let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
     let phases = PgPhaseRepo::new(pool.clone())
@@ -77,9 +77,8 @@ pub async fn phase_list(dsn: Option<&str>, project: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// `aoi create` — vincula uma camada existente como AOI do projeto.
-///
-/// `phase` (opcional) associa a AOI a uma fase do MESMO projeto (validado).
+/// `aoi create` — vincula uma camada existente como AOI do projeto
+/// (`ta_flow::aoi::create`; fase opcional do MESMO projeto, validada lá).
 pub async fn aoi_create(
     dsn: Option<&str>,
     project: &str,
@@ -89,50 +88,19 @@ pub async fn aoi_create(
 ) -> Result<(), String> {
     let pool = crate::open_pool(dsn).await?;
     let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
-    let layer_row = PgLayerRepo::new(pool.clone())
-        .get(layer)
+    let linked = flow_aoi::create(&pool, &project.id, layer, id_column, phase)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("camada `{layer}` não existe"))?;
-    if layer_row.project_id != project.id {
-        return Err(format!(
-            "camada `{layer}` pertence a outro projeto ({})",
-            layer_row.project_id
-        ));
-    }
-
-    // Fase opcional: precisa existir e ser do MESMO projeto (erro acionável).
-    let phase_id = match phase {
-        Some(pid) => Some(ensure_phase_in_project(&pool, &project.id, pid).await?),
-        None => None,
-    };
-
-    let saved = PgAoiLayerRepo::new(pool.clone())
-        .create(
-            &AoiLayer::new(&project.id, &layer_row.id, id_column).with_phase(phase_id.as_deref()),
-        )
-        .await
-        .map_err(|e| format!("criar AOI: {e}"))?;
+        .map_err(|e| e.to_string())?;
     println!(
         "aoi criada: {}\tprojeto={}\tcamada={} ({})",
-        saved.id, project.name, layer_row.name, layer_row.id
+        linked.aoi.id, project.name, linked.layer_name, linked.layer_id
     );
     pool.close().await;
     Ok(())
 }
 
-/// `grid create` — gera a grade com o motor puro e persiste camada + células
-/// em **uma transação**.
-///
-/// `resolution` e a origem são expressas **nas unidades do SRS `srid`** (graus
-/// se geográfico, ex.: 4674; metros se projetado, ex.: 5880) — Decisão 4
-/// retificada em 2026-10-18. A AOI é lida em 4674 e reprojetada para `srid`
-/// (PostGIS `ST_Transform`) antes do recorte; as células geradas em `srid` são
-/// persistidas em `cells.geom` (canônico, EPSG:4674).
-///
-/// `phase` (opcional) associa a grade a uma fase do MESMO projeto (validado).
-// Assinatura plana da CLI (8 parâmetros) refletindo as flags de `grid create`;
-// agrupar num struct só para calar o lint adicionaria ruído a um único chamador.
+/// `grid create` — gera a grade e persiste camada + células
+/// (`ta_flow::grid::create`; resolução/origem nas unidades de `--srid`).
 #[allow(clippy::too_many_arguments)]
 pub async fn grid_create(
     dsn: Option<&str>,
@@ -145,57 +113,28 @@ pub async fn grid_create(
     phase: Option<&str>,
 ) -> Result<(), String> {
     let pool = crate::open_pool(dsn).await?;
-    // EPSG precisa existir em `spatial_ref_sys` (erro acionável antes de
-    // qualquer reprojeção) e define as unidades da resolução/origem.
-    let units = srid_units(&pool, srid).await.map_err(|e| e.to_string())?;
-    let aoi = PgAoiLayerRepo::new(pool.clone())
-        .get(aoi_layer_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("AOI `{aoi_layer_id}` não existe"))?;
-
-    // Geometria da AOI = todas as feições poligonais da camada vinculada,
-    // lidas no SRS de armazenamento (4674).
-    let features = PgFeatureRepo::new(pool.clone())
-        .list(&aoi.layer_id)
-        .await
-        .map_err(|e| format!("lendo a geometria da AOI: {e}"))?;
-    let area_storage = multipolygon_from_features(&features)?;
-    // Recorte acontece no SRS da grade; a AOI é reprojetada 4674 → srid.
-    let area = aoi_in_srid(&pool, &area_storage, srid).await?;
-
-    let origin_x = origin_x.unwrap_or_else(|| aoi_bbox(&area).map(|b| b[0]).unwrap_or(0.0));
-    let origin_y = origin_y.unwrap_or_else(|| aoi_bbox(&area).map(|b| b[1]).unwrap_or(0.0));
-    let spec = GridSpec::new(resolution, origin_x, origin_y, srid);
-
-    // Teto de células (`projects.max_cells`): aplicado UMA vez, dentro de
-    // `persist_grid` (mesma função usada pelo seed) — não repetir aqui.
-
-    // Fase opcional: precisa existir e ser do MESMO projeto (erro acionável).
-    let phase_id = match phase {
-        Some(pid) => Some(ensure_phase_in_project(&pool, &aoi.project_id, pid).await?),
-        None => None,
-    };
-
-    let name = name.unwrap_or_else(|| "grade".to_owned());
-    let (layer, inserted) = persist_grid(
+    let created = flow_grid::create(
         &pool,
-        &aoi.project_id,
-        &aoi.id,
-        &name,
-        &spec,
-        &area,
-        phase_id.as_deref(),
+        aoi_layer_id,
+        resolution,
+        origin_x,
+        origin_y,
+        srid,
+        name.as_deref(),
+        phase,
     )
-    .await?;
-    let count = PgCellRepo::new(pool.clone())
-        .count(&layer.id)
-        .await
-        .map_err(|e| e.to_string())?;
+    .await
+    .map_err(|e| e.to_string())?;
     println!(
         "grade criada: {}\tnome={}\tresolucao={} ({})\tsrid={}\n  células: {} \
-         (inseridas agora: {inserted})",
-        layer.id, layer.name, layer.resolution, units, layer.srid, count
+         (inseridas agora: {})",
+        created.layer.id,
+        created.layer.name,
+        created.layer.resolution,
+        created.units,
+        created.layer.srid,
+        created.count,
+        created.inserted
     );
     pool.close().await;
     Ok(())
@@ -293,184 +232,6 @@ pub async fn cell_list_blocked(dsn: Option<&str>, cell_layer_id: &str) -> Result
     }
     pool.close().await;
     Ok(())
-}
-
-/// Converte as feições de uma camada em um [`MultiPolygon`] (AOI poligonal),
-/// lidas no SRS de armazenamento (EPSG:4674). Feições não poligonais são
-/// ignoradas; se não sobrar nenhuma, é erro.
-pub fn multipolygon_from_features(features: &[Feature]) -> Result<MultiPolygon<f64>, String> {
-    let mut polygons: Vec<Polygon<f64>> = Vec::new();
-    for feature in features {
-        match &feature.geom {
-            Geometry::Polygon(p) => polygons.push(p.clone()),
-            Geometry::MultiPolygon(mp) => polygons.extend(mp.0.iter().cloned()),
-            _ => {}
-        }
-    }
-    if polygons.is_empty() {
-        return Err("a AOI precisa de pelo menos uma feição poligonal".to_owned());
-    }
-    Ok(MultiPolygon::new(polygons))
-}
-
-/// AOI no SRS da grade: reprojetа 4674 → `srid` com PostGIS `ST_Transform`.
-///
-/// Quando `srid` já é o SRS de armazenamento (4674), devolve a geometria
-/// **sem** round-trip (nenhuma transformação é aplicada desnecessariamente).
-async fn aoi_in_srid(
-    pool: &PgPool,
-    area_4674: &MultiPolygon<f64>,
-    srid: i32,
-) -> Result<MultiPolygon<f64>, String> {
-    if srid == TARGET_SRID as i32 {
-        return Ok(area_4674.clone());
-    }
-    let target = u32::try_from(srid).map_err(|_| format!("EPSG inválido: {srid}"))?;
-    let geom = transform_geometry(
-        pool,
-        &Geometry::MultiPolygon(area_4674.clone()),
-        TARGET_SRID,
-        target,
-    )
-    .await
-    .map_err(|e| format!("reprojetando a AOI para EPSG:{srid}: {e}"))?;
-    match geom {
-        Geometry::MultiPolygon(mp) => Ok(mp),
-        other => Err(format!(
-            "reprojeção da AOI produziu geometria inesperada: {other:?}"
-        )),
-    }
-}
-
-/// Gera a grade (motor puro) e persiste camada + células em UMA transação.
-///
-/// Devolve a camada criada e o número de células efetivamente inseridas. É
-/// idempotente no nível das células (`ON CONFLICT DO NOTHING`). Aplica a mesma
-/// política de `projects.max_cells` do caminho do CLI (`enforce_max_cells`),
-/// para que a regra do projeto seja única.
-pub async fn persist_grid(
-    pool: &PgPool,
-    project_id: &str,
-    aoi_layer_id: &str,
-    name: &str,
-    spec: &GridSpec,
-    area: &MultiPolygon<f64>,
-    phase_id: Option<&str>,
-) -> Result<(CellLayer, u64), String> {
-    enforce_max_cells(pool, project_id, area, spec).await?;
-    let generated = generate_grid(area, spec).map_err(|e| e.to_string())?;
-    let cells = cells_from_grid(&generated);
-
-    let layer = CellLayer::new(project_id, aoi_layer_id, name, spec).with_phase(phase_id);
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("iniciando transação: {e}"))?;
-    let saved = PgCellLayerRepo::create_on(&mut *tx, &layer)
-        .await
-        .map_err(|e| cell_layer_create_error(&e, name))?;
-    let inserted = PgCellRepo::bulk_insert_on(&mut tx, &saved.id, &cells, spec.srid)
-        .await
-        .map_err(|e| format!("gravando células: {e}"))?;
-    tx.commit()
-        .await
-        .map_err(|e| format!("commit das células: {e}"))?;
-    Ok((saved, inserted))
-}
-
-/// Aplica a política de escala do projeto: `projects.max_cells` é o teto de
-/// células **candidatas** da grade (o teto de memória do motor continua
-/// valendo por cima). `max_cells < 0` desliga o teto de negócio.
-///
-/// Função única usada tanto pelo `grid create` quanto pelo caminho do seed
-/// (`persist_grid`), para que a política do projeto não divirja.
-pub async fn enforce_max_cells(
-    pool: &PgPool,
-    project_id: &str,
-    area: &MultiPolygon<f64>,
-    spec: &GridSpec,
-) -> Result<(), String> {
-    let max_cells: i32 = sqlx::query_scalar("SELECT max_cells FROM projects WHERE id = $1::uuid")
-        .bind(project_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| format!("lendo max_cells do projeto: {e}"))?;
-    let needed = candidate_count(area, spec).map_err(|e| e.to_string())?;
-    if max_cells >= 0 && needed > max_cells as u64 {
-        return Err(format!(
-            "grade grande demais para o projeto: {needed} células candidatas \
-             excedem max_cells={max_cells} (aumente max_cells ou a resolução)"
-        ));
-    }
-    Ok(())
-}
-
-/// Resolve e valida que uma fase pertence ao projeto; devolve o id canônico.
-/// Erro acionável quando a fase não existe ou é de outro projeto.
-async fn ensure_phase_in_project(
-    pool: &PgPool,
-    project_id: &str,
-    phase_id: &str,
-) -> Result<String, String> {
-    let phase = PgPhaseRepo::new(pool.clone())
-        .get(phase_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("fase `{phase_id}` não existe"))?;
-    if phase.project_id != project_id {
-        return Err(format!(
-            "fase `{phase_id}` pertence a outro projeto ({}); use uma fase deste projeto",
-            phase.project_id
-        ));
-    }
-    Ok(phase.id)
-}
-
-/// Erro de criação de fase: nome duplicado no projeto vira mensagem acionável
-/// (a única colisão esperada é o `UNIQUE(project_id, name)`).
-fn phase_create_error(err: &ta_db::Error, name: &str) -> String {
-    if let ta_db::Error::Sql(sqlx::Error::Database(db)) = err {
-        if db.is_unique_violation() {
-            return format!(
-                "já existe uma fase com o nome `{name}` neste projeto; escolha outro nome em --name"
-            );
-        }
-    }
-    format!("criar fase `{name}`: {err}")
-}
-
-/// Erro de criação da camada de células: nome duplicado no projeto vira
-/// mensagem acionável (a única colisão esperada é o `UNIQUE(project_id, name)`).
-fn cell_layer_create_error(err: &ta_db::Error, name: &str) -> String {
-    if let ta_db::Error::Sql(sqlx::Error::Database(db)) = err {
-        if db.is_unique_violation() {
-            return format!(
-                "já existe uma camada de células com o nome `{name}` neste projeto; \
-                 escolha outro nome em --name"
-            );
-        }
-    }
-    format!("criando camada de células: {err}")
-}
-
-/// Gera as células (motor puro) já no formato persistível (`ta_core::cell::Cell`).
-pub fn generate_cells(area: &MultiPolygon<f64>, spec: &GridSpec) -> Result<Vec<Cell>, String> {
-    let generated = generate_grid(area, spec).map_err(|e| e.to_string())?;
-    Ok(cells_from_grid(&generated))
-}
-
-fn cells_from_grid(generated: &[ta_engine::GridCell]) -> Vec<Cell> {
-    generated
-        .iter()
-        .map(|c| Cell {
-            id: 0,
-            cell_layer_id: String::new(),
-            cell_id: c.cell_id.clone(),
-            geom: c.geom.clone(),
-            row_index: c.row_index,
-            col_index: c.col_index,
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1358,6 +1119,17 @@ async fn resolve_class(pool: &PgPool, project_id: &str, id_or_name: &str) -> Res
 /// Valida que a camada de células é do projeto e devolve o id canônico.
 /// Delegação fina a `ta_flow` (o executor dono da regra desde a Fase 5a) —
 /// mesmas mensagens; o texto da CLI sai do `Display` do erro tipado.
+/// Fase do projeto (id canônico) — mesma validação do preparo (`ta-flow`).
+async fn ensure_phase_in_project(
+    pool: &PgPool,
+    project_id: &str,
+    phase_id: &str,
+) -> Result<String, String> {
+    ta_flow::phase::ensure_in_project(pool, project_id, phase_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 pub(crate) async fn ensure_cell_layer_in_project(
     pool: &PgPool,
     project_id: &str,
@@ -1416,7 +1188,7 @@ pub fn parse_observations(spec: &str) -> Result<std::collections::BTreeMap<Strin
             )
         })?;
         let name = name.trim().to_ascii_lowercase();
-        if !is_measure_name(&name) {
+        if !ta_flow::measures::is_valid_measure_name(&name) {
             return Err(format!(
                 "nome de medida inválido `{name}`: use letras minúsculas, dígitos e `_` \
                  (começando por letra ou `_`)"
@@ -1436,17 +1208,6 @@ pub fn parse_observations(spec: &str) -> Result<std::collections::BTreeMap<Strin
         }
     }
     Ok(measures)
-}
-
-fn is_measure_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first.is_ascii_lowercase() || first == '_') {
-        return false;
-    }
-    chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 /// Erro de escrita com nome duplicado vira mensagem acionável (a única

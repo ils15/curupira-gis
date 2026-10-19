@@ -14,7 +14,6 @@ use ta_core::classification::CellMeasure;
 use ta_core::task::ProcessStatus;
 use ta_db::repo::PgProjectRepo;
 use ta_db::repo_cell::{CellLayerRepo, CellRepo, PgCellLayerRepo, PgCellRepo};
-use ta_db::repo_ruleset::{PgRuleSetRepo, RuleSetRepo};
 use ta_db::repo_scene::{PgSceneRepo, SceneRepo};
 use ta_db::repo_task::{EnqueueReport, PgTaskRepo, TaskRepo};
 use ta_flow::queue::{
@@ -108,6 +107,38 @@ pub(crate) async fn measure_set(
     Ok(())
 }
 
+/// `measure import-csv` — formatação do relatório de
+/// [`ta_flow::measures::import_csv`] (mesmo caminho do painel Monitoramento).
+///
+/// Imprime lidas/gravadas/ignoradas e, no máximo, 50 motivos (um CSV de
+/// milhares de linhas não deve inundar o terminal; o total está na 1ª linha).
+pub(crate) async fn measure_import_csv(
+    dsn: Option<&str>,
+    cell_layer_id: &str,
+    input: &str,
+) -> Result<(), String> {
+    let pool = crate::open_pool(dsn).await?;
+    let report = ta_flow::measures::import_csv(&pool, cell_layer_id, input)
+        .await
+        .map_err(|e| e.to_string())?;
+    println!(
+        "medidas importadas: lidas={}\tgravadas={}\tignoradas={}",
+        report.read, report.written, report.skipped
+    );
+    const MAX_ISSUES: usize = 50;
+    for issue in ta_flow::measures::issues_for_display(&report, MAX_ISSUES) {
+        println!("  linha {}: {}", issue.line, issue.reason);
+    }
+    if report.issues.len() > MAX_ISSUES {
+        println!(
+            "  … e {} linha(s) ignorada(s) com motivo (veja o arquivo)",
+            report.issues.len() - MAX_ISSUES
+        );
+    }
+    pool.close().await;
+    Ok(())
+}
+
 /// `measure list` — lista as medidas da camada (opcionalmente de uma célula).
 pub(crate) async fn measure_list(
     dsn: Option<&str>,
@@ -159,8 +190,8 @@ pub(crate) async fn measure_clear(
 // ruleset activate
 // ---------------------------------------------------------------------------
 
-/// `ruleset activate` — torna este ruleset o ATIVO do projeto (desativa os
-/// demais; o índice parcial único no banco garante no máximo um).
+/// `ruleset activate` — formatação sobre [`ta_flow::ruleset::activate`] (a
+/// regra de resolução por nome/versão e a unicidade do ativo são do fluxo).
 pub(crate) async fn ruleset_activate(
     dsn: Option<&str>,
     project: &str,
@@ -169,24 +200,9 @@ pub(crate) async fn ruleset_activate(
 ) -> Result<(), String> {
     let pool = crate::open_pool(dsn).await?;
     let project = resolve_project(&PgProjectRepo::new(pool.clone()), project).await?;
-    let ruleset = PgRuleSetRepo::new(pool.clone())
-        .find(&project.id, name, version)
+    let activated = ta_flow::ruleset::activate(&pool, &project.id, &project.name, name, version)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| {
-            format!(
-                "ruleset `{name}`{} não existe no projeto `{}`; crie com `ruleset create`",
-                version
-                    .map(|v| format!(" (versão {v})"))
-                    .unwrap_or_default(),
-                project.name
-            )
-        })?;
-    let activated = PgRuleSetRepo::new(pool.clone())
-        .activate(&ruleset.id)
-        .await
-        .map_err(|e| format!("ativar ruleset: {e}"))?
-        .ok_or_else(|| format!("ruleset `{}` sumiu durante a ativação", ruleset.id))?;
+        .map_err(|e| e.to_string())?;
     println!(
         "ruleset ativo: {}\t{}\tversao={}\tprojeto={}",
         activated.id, activated.name, activated.version, project.name

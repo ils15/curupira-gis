@@ -225,27 +225,29 @@ pub async fn is_postgis_ready(pool: &PgPool) -> Result<bool> {
     Ok(ready)
 }
 
-/// Aplica as migrações sqlx do crate (`migrations/`) de forma idempotente.
+/// Migrações **embarcadas** no binário em tempo de compilação.
 ///
-/// Usa o `Migrator` em modo runtime (sem macro compile-time): o caminho é
-/// resolvido a partir de `CARGO_MANIFEST_DIR`, então funciona de qualquer
-/// working directory e não exige DATABASE_URL na compilação (risco R2).
+/// A versão anterior resolvia `CARGO_MANIFEST_DIR` em runtime: funcionava no
+/// checkout de desenvolvimento, mas num binário empacotado (`.deb`, tar.gz,
+/// instalador) o caminho do crate de build não existe na máquina do usuário —
+/// a GUI e a CLI falhavam ao conectar. `sqlx::migrate!` embute os arquivos no
+/// executável (o diretório é relativo ao `CARGO_MANIFEST_DIR` **na compilação**,
+/// não exige `DATABASE_URL`) e elimina o risco de runtime.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// Aplica as migrações sqlx embarcadas de forma idempotente.
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-    let migrator = sqlx::migrate::Migrator::new(dir).await?;
-    migrator.run(pool).await?;
+    MIGRATOR.run(pool).await?;
     Ok(())
 }
 
-/// Versões das migrações disponíveis em `migrations/` (crescente).
+/// Versões das migrações disponíveis (crescente).
 ///
-/// Lê o MESMO diretório que [`run_migrations`] aplica — é o lado "esperado"
-/// da comparação feita pelo `ta-cli doctor` (`_sqlx_migrations` é o lado
-/// aplicado).
+/// Lê o MESMO conjunto embarcado que [`run_migrations`] aplica — é o lado
+/// "esperado" da comparação feita pelo `ta-cli doctor` (`_sqlx_migrations` é
+/// o lado aplicado).
 pub async fn local_migration_versions() -> Result<Vec<i64>> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-    let migrator = sqlx::migrate::Migrator::new(dir).await?;
-    Ok(migrator.iter().map(|m| m.version).collect())
+    Ok(MIGRATOR.iter().map(|m| m.version).collect())
 }
 
 /// Versões já aplicadas no banco (`_sqlx_migrations`), crescente.
