@@ -1,0 +1,100 @@
+name: release-please
+
+# Versionamento automático do Curupira GIS.
+#
+# FLUXO (4 passos, com gate humano no final):
+#   1. devs fazem commits conventional no `main`;
+#   2. o release-please abre/atualiza o "Release PR" (bump de
+#      [workspace.package] version + CHANGELOG.md);
+#   3. alguém mergeia o Release PR -> o manifesto muda -> o job `tag` cria a
+#      tag `vX.Y.Z` (derivada do manifesto) -> o `release.yml` roda, espera o
+#      CI verde e gera a release DRAFT com os assets;
+#   4. um humano clica "Publish" na release.
+#
+# A tag NÃO é criada pelo release-please: com `skip-github-release: true` no
+# release-please-config.json o release-please só faz o Release PR (a tag é
+# efeito colateral da criação da GitHub Release — ver o comentário do
+# scripts/create-release-tag.sh). A versão tem UMA fonte (o manifesto), então
+# a tag não pode divergir do [workspace.package] version.
+#
+# Action pinada por SHA de commit (review F0-N): googleapis/release-please-action
+#   v4.4.1 -> 5c625bfb5d1ff62eadeeb3772007f7f66fdcf071
+#   A tag `v4` é ANOTADA (annotated): o objeto da tag é
+#   8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5 ("Release v4", 2026-04-13) e o
+#   commit "peeled" (`refs/tags/v4^{}`) é 5c625bfb5d1ff62eadeeb3772007f7f66fdcf071
+#   = "chore(main): release 4.4.1 (#1187)". O pin é do COMMIT peelado (é o que
+#   o runner executa); o SHA do objeto da tag NÃO pode ser usado como pin.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  # `actions: read` NÃO é global de propósito: só o job `build-release` precisa
+  # dele (o job `wait-for-ci` do release.yml, chamado via `workflow_call`,
+  # consulta a API de runs do Actions) — e ele o declara no próprio job.
+
+concurrency:
+  # Não cancela: dois pushes seguidos no main podem gerar duas versões
+  # (bump + tag) e o segundo espera o primeiro terminar.
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release PR (bump + CHANGELOG)
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      # Histórico completo: o job `tag` compara o manifesto com o commit
+      # anterior para saber se um Release PR acabou de ser mergeado.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # `release-type` aqui é o DEFAULT dos pacotes. O
+          # release-please-config.json sobrescreve por pacote com
+          # `release-type: simple` + `extra-files` (jsonpath no
+          # [workspace.package] version) — a strategy `rust`/plugin
+          # `cargo-workspace` do upstream NÃO funciona neste repo: os crates
+          # usam `version.workspace = true` e a raiz é um manifest virtual
+          # (sem [package]) — ver README "Release" p/ o detalhe e a evidência.
+          release-type: rust
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # DEPOIS da action: se o release-please falhar, a tag NÃO é criada
+      # (a tag só existe se o Release PR foi de fato mergeado).
+      # `bash scripts/...` (e não `scripts/...`): não depender do bit de
+      # executável do git (o bit é por checkout, e o runner pode perder).
+      - name: Cria a tag v<versão do manifesto> (se ainda não existir)
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # SHA anterior do push (o "before" do evento push) — o script
+          # compara o manifesto com ele para saber se houve bump.
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        run: bash scripts/create-release-tag.sh
+
+  build-release:
+    name: Build da release (aguarda CI verde)
+    needs: [release-please]
+    if: needs.release-please.outputs.tag != ''
+    # Reuso do workflow de release: o `on: push: tags` do release.yml NÃO é
+    # disparado por tags criadas via API com GITHUB_TOKEN (o evento gerado
+    # pelo token do workflow não cria novas runs), então o build é chamado
+    # explicitamente por aqui, com a tag como input.
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag }}
+    permissions:
+      actions: read
+      contents: write

@@ -267,9 +267,131 @@ Do código-fonte: **[INSTALL.md](INSTALL.md)**. Binários de release (Linux
 assinado) em [Releases](https://github.com/ils15/curupira-gis/releases) —
 publicados como **draft** até revisão humana.
 
-Regra de tagueamento: a tag precisa bater com `[workspace.package] version`
-do `Cargo.toml` (ex.: `v0.1.0` == versão `0.1.0`); o workflow de release
-**falha** se não bater.
+### Fluxo de release (4 passos)
+
+O versionamento é automático: o [release-please](https://github.com/googleapis/release-please)
+mantém um *Release PR* que bumpa `[workspace.package] version` (raiz do
+`Cargo.toml`) e o `CHANGELOG.md`. **Não edite a versão à mão** — a tag é
+derivada do manifesto (`.release-please-manifest.json`), que é atualizado no
+mesmo PR, então tag e versão não podem divergir.
+
+1. **Conventional commit no `main`.** O `release-please` abre/atualiza o
+   *Release PR* ("chore: release main") com o bump de versão e o
+   `CHANGELOG.md`.
+2. **Merge do Release PR → a tag é criada.** O manifesto passa a
+   `X.Y.Z-alpha`; o job `tag` do workflow `release-please` roda o script
+   `scripts/create-release-tag.sh`, que **cria a tag `vX.Y.Z-alpha` a partir
+   do manifesto** (idempotente: se a tag já existir, nada é feito).
+3. **Build da release.** O `release.yml` roda, **aguarda o CI verde do
+   mesmo commit da tag** (job `wait-for-ci`; se o CI falhar, a release *não*
+   é montada) e cria a release como **draft** com os assets (tar.gz Linux,
+   `.deb`, zip Windows, instalador `CurupiraGIS-Setup-x64.exe`,
+   `CurupiraGIS-macos-arm64.zip`, SBOMs CycloneDX e `SHA256SUMS`).
+4. **Humano clica "Publish".** O gate humano é obrigatório: nada é publicado
+   sem uma pessoa marcar *Publish* na página da release.
+
+**O código publicado é sempre o da tag**, nos 3 gatilhos do `release.yml`
+(`push: tags`, `workflow_call`, `workflow_dispatch`): todo checkout de build
+usa `ref: ${{ inputs.tag || github.ref }}` e um passo de guarda compara o SHA
+do workspace com o SHA que a tag aponta — se divergirem, o job **falha**
+(nada é publicado). Sem essa guarda, o caminho `workflow_call` compilaria o
+código do `main` e rotularia o binário com o nome da tag.
+
+### O que o release-please **não** faz
+
+- **Não cria a GitHub Release.** O `release-please-config.json` usa
+  `skip-github-release: true` — o release-please só mantém o *Release PR*
+  (bump de versão + `CHANGELOG.md`).
+- **Não cria a tag.** A tag é criada pelo `scripts/create-release-tag.sh`
+  (job `tag` do `release-please.yml`), a partir do manifesto — é a
+  "infraestrutura de tagueamento" que o `skip-github-release` exige.
+- **Não publica nada.** A release **draft** é criada pelo `release.yml`
+  (job `release`), e **publicar** é um ato humano ("Publish").
+
+### Reexecutar o build de uma tag
+
+Aba → *Actions* → *release* → *Run workflow* → campo **tag** (ex.:
+`v0.3.0-alpha.1`) — **obrigatório**. O workflow refaz o build e
+atualiza o draft da release, sem novo push de tag. A tag não pode ficar
+vazia: sem ela, o disparo usaria a *ref* do workflow (a branch) e o build
+sairia do código errado (o job `verify-version` falharia).
+
+Reexecutar é seguro **enquanto a release for draft**: se a release já foi
+publicada, o job `release` **falha** com a mensagem *"a release `<tag>` já
+está publicada; re-rodar publicaria binário por cima — crie uma tag nova"*
+(nada é sobrescrito). Para republicar uma versão corrigida, crie uma **tag
+nova**.
+
+### Recuperação: release travada
+
+| Sintoma | Causa | O que fazer |
+|---|---|---|
+| O CI da tag foi **cancelado** (o `concurrency` do `ci.yml` cancela runs do `main` com o mesmo grupo) | grupo de concorrência antigo, cancelado por um push novo | 1. *Actions* → *ci* → localize o run **cancelado** da tag → **Re-run all jobs** (mesmo `run_id`); 2. depois, *Actions* → *release* → **Re-run all jobs** (o `wait-for-ci` volta a ver o CI verde). O grupo de concorrência atual é **por SHA no `main`** — um push novo **não** cancela mais o CI de um commit anterior. |
+| O CI da tag **falhou** (vermelho) | erro real no código | Corrija no `main`, faça o CI passar e re-rodar o `release.yml` com a **mesma tag** (o `wait-for-ci` espera o CI do SHA da tag) — ou, se a correção já é uma versão nova, faça o fluxo normal (Release PR → tag nova). |
+| O `release.yml` **falhou** no `wait-for-ci` | CI vermelho/cancelado/timeout, ou API do GitHub indisponível | Veja a linha `::error::` do job. Erro de API (`falha na API do GitHub`) → re-rodar; CI vermelho → corrigir e re-rodar. |
+| O `release.yml` **falhou** no `verify-version` | a tag não bate com `[workspace.package] version` | A tag está errada: apague-a e crie a tag certa, ou use o caminho de exceção abaixo. |
+| O `release.yml` **falhou** na guarda de SHA (*"build a partir de X mas a tag aponta para Y"*) | a tag foi movida/recriada entre a resolução e o build | Apague e recrie a tag (mesmo SHA) e re-rodar o `release.yml` com a tag. |
+
+### Release pontual sem bump (caminho de exceção)
+
+Para publicar uma versão **sem** bump automático (hotfix de packaging,
+reexecutar uma versão antiga): bump manual de `[workspace.package] version`
+no `Cargo.toml` **e** criação manual da tag `vX.Y.Z` no mesmo commit. É o
+caminho de exceção — a tag manual não passa pelo release-please, então
+**bump e tag têm que sair juntos e com o mesmo número** (o job
+`verify-version` falha se divergirem). Depois de publicar, alinhe
+`.release-please-manifest.json` com a versão publicada.
+
+### Por que o release-please não usa a strategy `rust`
+
+O `release-please-config.json` usa `release-type: simple` + `extra-files`
+(jsonpath `$.workspace.package.version`) em vez da strategy `rust` /
+plugin `cargo-workspace` do upstream. Motivo (verificado no código do
+upstream `googleapis/release-please` v17.11.2): os crates deste repo usam
+`version.workspace = true` e a raiz é um manifest virtual (sem `[package]`),
+e com isso o upstream **quebra**:
+
+- strategy `rust`: o updater `CargoToml` exige `package.version` como string
+  → `value at path package.version is not tagged` (crates) e
+  `is not a package manifest (might be a cargo workspace)` (raiz);
+- plugin `cargo-workspace`: exige `[package] version` literal em cada crate
+  → `package manifest at crates/ta-core/Cargo.toml has an invalid
+  [package.version]`.
+
+Com `extra-files` (tipo `toml`) o bump acontece **no manifesto raiz** — a
+fonte única da versão — e o `Cargo.lock` é atualizado junto, então o Release
+PR sai consistente (`cargo metadata --locked` passa). O `release-type: rust`
+no `with:` da action é apenas o default; o valor por pacote no config
+sobrescreve.
+
+### CHANGELOG e conventional commits
+
+O `CHANGELOG.md` fica **na raiz do repositório** e é gerado pelo
+release-please a partir dos conventional commits. O padrão do projeto:
+
+| Prefixo | Efeito na versão (0.x) | Efeito no CHANGELOG |
+|---|---|---|
+| `feat:` | minor (`0.3.0` → `0.4.0-alpha`) | *Features* |
+| `fix:` | patch (`0.3.0` → `0.3.1-alpha`) | *Bug Fixes* |
+| `docs:` | patch | *Documentation* |
+| `chore:` | patch | *Miscellaneous Chores* |
+| `BREAKING CHANGE:` no corpo | minor (0.x) / major (≥ 1.0) | *⚠ BREAKING CHANGES* |
+
+Qualquer commit conventional (inclusive `docs:`/`chore:`) já dispara um
+Release PR — use `chore:` para mudanças internas que **não** devam virar
+release, ou reúna-as antes de mergear.
+
+### Ambientes e revisão (opcional)
+
+Ambiente (`Settings` → *Environments* → *deploy*) e *required reviewers*
+por ambiente não são configurados por aqui: o MCP deste ambiente não mexe
+em Settings. **Opcional**: crie um environment `release` e marque o
+`release.yml` com `environment: release` + required reviewers, se quiser
+uma segunda barreira humana antes do build.
+
+Regra de tagueamento (o gate `verify-version` do `release.yml`): a tag
+precisa bater com `[workspace.package] version` do `Cargo.toml` (ex.:
+`v0.1.0` == versão `0.1.0`); o workflow de release **falha** se não bater.
 
 Licença dual **MIT OR Apache-2.0** (`LICENSE-MIT`, `LICENSE-APACHE`).
 Checkpoints de engenharia em `.pantheon/deepwork/terraamazon-cleanroom-rust/`.

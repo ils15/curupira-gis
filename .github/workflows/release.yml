@@ -3,11 +3,24 @@ name: release
 # Release Curupira GIS — disparada por tag `v*` (convenção: tag == versão do
 # workspace, ex.: v0.1.0 == Cargo.toml [workspace.package] version).
 #
+# FLUXO (4 passos, gate humano no final):
+#   1. devs fazem commits conventional no `main`;
+#   2. o release-please abre/atualiza o "Release PR" (bump de
+#      [workspace.package] version + CHANGELOG.md);
+#   3. o Release PR é mergeado -> o release-please cria a tag `vX.Y.Z` ->
+#      este workflow roda, ESPERA O CI VERDE e monta a release DRAFT com os
+#      assets;
+#   4. um humano clica "Publish".
+#
 # GATE DE VERSÃO (2026-10-19, @prometheus): a tag precisa bater com
 # [workspace.package] version do Cargo.toml; o job `verify-version` roda
 # ANTES de qualquer build e falha com mensagem explícita se divergir. Sem
 # ele, o instalador Windows (versão vinda da TAG) e o .deb (versão vinda do
 # Cargo.toml) podiam sair com versões diferentes — sem erro em nenhum job.
+# Desde 2026-10-19 a versão tem UMA fonte: o Release PR do release-please
+# bumpa o manifesto e o Cargo.toml no mesmo PR, e a tag é derivada do
+# manifesto (scripts/create-release-tag.sh) — a divergência tag↔versão
+# deixou de ser possível por construção.
 #
 # DECISÃO DE PACKAGING (2026-10-16, documentada no README "Releases"):
 # workflow MANUAL com matrix build em vez de cargo-dist. Motivos: (a) o CI do
@@ -24,16 +37,75 @@ name: release
 # instalador Windows (Inno Setup/ISCC), .deb (cargo-deb) e macOS arm64
 # (CurupiraGIS.app zip via packaging/macos/bundle.sh). Jobs existentes
 # intactos — apenas steps adicionados ao final.
+#
+# 2026-10-19 (@prometheus, modernização do CI/CD):
+#   * `workflow_dispatch` com input `tag` — re-rodar o build de uma tag já
+#     existente sem novo push de tag (o input `tag` é OBRIGATÓRIO: vazio
+#     significaria "a ref do disparo" = a branch, e o build sairia do código
+#     errado);
+#   * `workflow_call` — o release-please chama este workflow explicitamente
+#     (tags criadas via API com GITHUB_TOKEN não disparam `on: push: tags`);
+#   * job `wait-for-ci` — a release só é montada se o CI do MESMO SHA da tag
+#     estiver verde (espera até 15 min, poll de 30 s);
+#   * `concurrency` — releases da mesma tag não rodam em paralelo.
+#
+# REGRA DE REF (B-1, 2026-10-19): todo checkout de BUILD usa
+# `ref: ${{ inputs.tag || github.ref }}` e uma GUARDA que compara o SHA do
+# workspace com o SHA resolvido pela tag (output do job `wait-for-ci`),
+# falhando se divergirem. Sem isso, no caminho `workflow_call` o default do
+# checkout é `github.ref` do CALLER (= `refs/heads/main`) e os assets da
+# release viriam do código de `main` rotulados com a tag — sem erro em
+# nenhum job. A regra vale para os 3 gatilhos (`push: tags`,
+# `workflow_call`, `workflow_dispatch`).
+#
+# RE-RUN DE RELEASE PUBLICADA (M-1, 2026-10-19): se a release da tag já
+# existe e NÃO é draft, o job `release` FALHA (o `--clobber` publicaria
+# binário por cima de uma release já distribuída). Atualizar um DRAFT
+# continua permitido.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag a reconstruir (ex.: v0.3.0-alpha.1). OBRIGATÓRIO: sem tag, o disparo usaria a ref do workflow (a branch) e o build sairia do código errado."
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag a construir (ex.: v0.3.0-alpha)."
+        required: true
+        type: string
 
+# REGRA DE REF (B-1, 2026-10-19, @prometheus): TODO checkout de BUILD usa
+# `ref: ${{ inputs.tag || github.ref }}` — o código compilado é SEMPRE o da
+# tag, nos 3 gatilhos:
+#   * `push: tags`      -> github.ref == refs/tags/vX.Y.Z (a própria tag);
+#   * `workflow_call`   -> inputs.tag (a tag pedida pelo caller);
+#   * `workflow_dispatch` -> inputs.tag (obrigatório).
+# Sem isso, no `workflow_call` o default do checkout é `github.ref` do
+# CALLER (= refs/heads/main) e a release sairia com o binário de `main`
+# rotulado como a tag. Além do `ref:`, cada job de build tem uma GUARDA que
+# compara o SHA do workspace com o SHA resolvido pela tag e FALHA na
+# divergência (ver o step "Confere que o build é do commit da tag").
 permissions:
-  contents: write
+  contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
+  # Tag alvo. No disparo por `push: tags` = a própria tag; no
+  # `workflow_dispatch` = o input; no `workflow_call` = o input do caller.
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+# Releases da MESMA tag não rodam em paralelo (o `cancel-in-progress: false`
+# deixa o run anterior terminar — cancelar uma release em andamento deixaria
+# assets pela metade).
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 # Actions pinadas por SHA de commit (review F0-N):
 #   actions/checkout@v6.1.0
@@ -54,6 +126,31 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # GUARDA DO B-1: o código verificado tem que ser o da TAG. O checkout
+      # acima usa a tag; aqui comparamos o SHA do workspace com o SHA que a
+      # tag aponta (resolvido pela API) e falhamos se divergirem. Sem esta
+      # guarda, um `workflow_call` (ou um `workflow_dispatch` de tag antiga)
+      # publicaria o binário de `main` rotulado como a tag, sem erro.
+      - name: Confere que o build é do commit da tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG}"
+          sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha 2>/dev/null || true)"
+          if [ -z "$sha" ]; then
+            echo "::error::não consegui resolver o SHA da tag ${tag} — a tag existe no repositório?"
+            exit 1
+          fi
+          ws="$(git rev-parse 'HEAD^{commit}')"
+          if [ "$ws" != "$sha" ]; then
+            echo "::error::build a partir de ${ws} mas a tag aponta para ${sha}"
+            exit 1
+          fi
+          echo "OK: workspace (${ws}) == tag ${tag} (${sha})"
 
       - name: Compara tag com [workspace.package] version do Cargo.toml
         shell: bash
@@ -61,7 +158,12 @@ jobs:
           set -euo pipefail
 
           manifest="Cargo.toml"
-          tag="${GITHUB_REF_NAME}"
+          tag="${RELEASE_TAG}"
+
+          if [ -z "$tag" ]; then
+            echo "::error::nenhuma tag informada — no workflow_dispatch, preencha o input 'tag' (ex.: v0.3.0-alpha.1); o disparo por push de tag já traz a tag."
+            exit 1
+          fi
 
           # Versão do workspace: extrai APENAS a chave `version` da seção
           # [workspace.package] do Cargo.toml da raiz (o awk percorre as
@@ -115,16 +217,88 @@ jobs:
             # já reportam 0.1.0 (o .deb vem do Cargo.toml).
             echo "OK: a tag $tag é pré-release ($tag_suffix) da versão do workspace $manifest_version"
           else
-            echo "::error::tag $tag ≠ versão do workspace $manifest_version — atualize [workspace.package] version no Cargo.toml antes de taguear"
+            echo "::error::tag $tag ≠ versão do workspace $manifest_version — a versão agora é bumpada pelo Release PR do release-please (mergeado no main, o manifesto .release-please-manifest.json e o Cargo.toml são atualizados no mesmo PR). Não ajuste o Cargo.toml à mão: corrija o Release PR (ou, em release pontual sem bump, veja README §Release)."
             exit 1
           fi
 
-  build-linux:
-    name: linux x86_64-gnu (tar.gz)
+  # ── GATE DE CI VERDE ──────────────────────────────────────────────────────
+  # A release só é montada se o CI do MESMO SHA da tag estiver verde.
+  # Sem este gate, uma tag empurrada sobre um commit com CI vermelho gerava
+  # uma draft com assets possivelmente quebrados. O job espera (poll de 30 s)
+  # até 15 min pelo run do CI e FALHA (job inteiro) se o CI não passar.
+  wait-for-ci:
+    name: Aguarda CI verde no commit da tag
     needs: [verify-version]
     runs-on: ubuntu-latest
+    # O SHA resolvido da tag é exportado para os jobs de build: eles
+    # comparam o SHA do workspace (após o checkout) com este valor e falham
+    # se divergirem (guarda do B-1).
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      # Checkout da branch padrão (e NÃO da tag): este job só precisa do
+      # script de espera — o SHA da tag é resolvido pela API. Assim o gate
+      # funciona também no re-run de tags antigas (criadas antes do script
+      # existir). Os jobs de BUILD continuam na commit da tag (ref: a tag).
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Resolve o SHA da tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # /commits/{ref} aceita uma tag e devolve o commit "peeled"
+          # (funciona para tag leve e anotada).
+          if ! sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq .sha 2>&1)"; then
+            echo "::error::não consegui resolver o SHA da tag ${RELEASE_TAG}: ${sha}"
+            exit 1
+          fi
+          if [ -z "$sha" ]; then
+            echo "::error::não consegui resolver o SHA da tag ${RELEASE_TAG}"
+            exit 1
+          fi
+          echo "tag ${RELEASE_TAG} -> ${sha}"
+          echo "sha=${sha}" >>"$GITHUB_OUTPUT"
+
+      - name: Aguarda o CI verde (poll 30s, limite 15min)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Limites sobrescritíveis p/ teste local (scripts/wait-for-ci.sh).
+          CI_TIMEOUT_SECONDS: ${{ vars.CI_RELEASE_TIMEOUT_SECONDS || '900' }}
+          CI_POLL_SECONDS: ${{ vars.CI_RELEASE_POLL_SECONDS || '30' }}
+        run: bash scripts/wait-for-ci.sh "${{ steps.resolve.outputs.sha }}" ci.yml
+
+  build-linux:
+    name: linux x86_64-gnu (tar.gz)
+    needs: [verify-version, wait-for-ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # GUARDA DO B-1: o build tem que sair do commit da TAG — o mesmo SHA
+      # que o job `wait-for-ci` validou como CI verde. Se divergir, FALHA
+      # (sem publicar nada).
+      - name: Confere que o build é do commit da tag
+        env:
+          EXPECTED_SHA: ${{ needs.wait-for-ci.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse 'HEAD^{commit}')"
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error::build a partir de ${actual} mas a tag aponta para ${EXPECTED_SHA}"
+            exit 1
+          fi
+          echo "OK: build a partir de ${actual} (tag ${RELEASE_TAG})"
 
       - name: Instala toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
@@ -137,14 +311,14 @@ jobs:
 
       - name: Empacota tar.gz (curupira-gis + ta-cli)
         run: |
-          mkdir -p dist/curupira-gis-"${GITHUB_REF_NAME}"-x86_64-unknown-linux-gnu
+          mkdir -p dist/curupira-gis-"${RELEASE_TAG}"-x86_64-unknown-linux-gnu
           cp target/release/curupira-gis target/release/ta-cli \
-            dist/curupira-gis-"${GITHUB_REF_NAME}"-x86_64-unknown-linux-gnu/
+            dist/curupira-gis-"${RELEASE_TAG}"-x86_64-unknown-linux-gnu/
           cp README.md LICENSE-MIT LICENSE-APACHE NOTICE.md \
-            dist/curupira-gis-"${GITHUB_REF_NAME}"-x86_64-unknown-linux-gnu/
+            dist/curupira-gis-"${RELEASE_TAG}"-x86_64-unknown-linux-gnu/
           tar czf \
-            "dist/curupira-gis-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz" \
-            -C dist "curupira-gis-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+            "dist/curupira-gis-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz" \
+            -C dist "curupira-gis-${RELEASE_TAG}-x86_64-unknown-linux-gnu"
 
       - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
@@ -183,12 +357,31 @@ jobs:
 
   build-windows:
     name: windows x86_64-msvc (zip com GDAL embutida)
-    needs: [verify-version]
+    needs: [verify-version, wait-for-ci]
     runs-on: windows-latest
+    permissions:
+      contents: read
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # GUARDA DO B-1: o build tem que sair do commit da TAG — o mesmo SHA
+      # que o job `wait-for-ci` validou como CI verde. Se divergir, FALHA
+      # (sem publicar nada).
+      - name: Confere que o build é do commit da tag
+        env:
+          EXPECTED_SHA: ${{ needs.wait-for-ci.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse 'HEAD^{commit}')"
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error::build a partir de ${actual} mas a tag aponta para ${EXPECTED_SHA}"
+            exit 1
+          fi
+          echo "OK: build a partir de ${actual} (tag ${RELEASE_TAG})"
 
       - name: Instala toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
@@ -271,7 +464,7 @@ jobs:
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT; if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
           $bin = Join-Path $vcpkgRoot "installed\x64-windows\bin"
           $share = Join-Path $vcpkgRoot "installed\x64-windows\share"
-          $name = "curupira-gis-$($env:GITHUB_REF_NAME)-x86_64-pc-windows-msvc"
+          $name = "curupira-gis-$($env:RELEASE_TAG)-x86_64-pc-windows-msvc"
           $stage = "dist\$name"
           New-Item -ItemType Directory -Force -Path "$stage\share" | Out-Null
           Copy-Item target\release\curupira-gis.exe $stage\
@@ -384,7 +577,7 @@ jobs:
           Copy-Item -Recurse "$share\gdal" "$stage\share\gdal"
           # AppVersion do Inno precisa ser numérica pontuada (x.y[.z[.w]]) em
           # qualquer 6.x: "v0.1.0-alpha" → VERSION=0.1.0.
-          $version = $env:GITHUB_REF_NAME -replace '^v',''
+          $version = $env:RELEASE_TAG -replace '^v',''
           $numeric = ($version -split '-')[0]
           # Tradução pt-BR (OPCIONAL — nunca falha o job por idioma): o
           # Languages\ fica no dir do ISCC REAL resolvido no step anterior (o
@@ -418,10 +611,29 @@ jobs:
 
   build-macos:
     name: macos arm64 (CurupiraGIS.app zip, GDAL 3.12 conda-forge)
-    needs: [verify-version]
+    needs: [verify-version, wait-for-ci]
     runs-on: macos-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # GUARDA DO B-1: o build tem que sair do commit da TAG — o mesmo SHA
+      # que o job `wait-for-ci` validou como CI verde. Se divergir, FALHA
+      # (sem publicar nada).
+      - name: Confere que o build é do commit da tag
+        env:
+          EXPECTED_SHA: ${{ needs.wait-for-ci.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse 'HEAD^{commit}')"
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error::build a partir de ${actual} mas a tag aponta para ${EXPECTED_SHA}"
+            exit 1
+          fi
+          echo "OK: build a partir de ${actual} (tag ${RELEASE_TAG})"
 
       - name: Instala toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
@@ -505,7 +717,7 @@ jobs:
         # com install_name_tool, RE-ASSINA ad-hoc (obrigatório no arm64 após
         # install_name_tool) e zipa CurupiraGIS-macos-arm64.zip.
         run: |
-          v="${GITHUB_REF_NAME#v}"; v="${v%%-*}"
+          v="${RELEASE_TAG#v}"; v="${v%%-*}"
           bash packaging/macos/bundle.sh "$v" target/release dist
 
       # NOTA (usuário final): zip NÃO assinado — no 1º uso, botão direito no
@@ -519,10 +731,28 @@ jobs:
 
   sbom:
     name: SBOM CycloneDX (workspace)
-    needs: [verify-version]
+    needs: [verify-version, wait-for-ci]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # GUARDA DO B-1: o SBOM tem que ser do commit da TAG — o mesmo SHA que
+      # o job `wait-for-ci` validou como CI verde. Se divergir, FALHA.
+      - name: Confere que o build é do commit da tag
+        env:
+          EXPECTED_SHA: ${{ needs.wait-for-ci.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse 'HEAD^{commit}')"
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error::build a partir de ${actual} mas a tag aponta para ${EXPECTED_SHA}"
+            exit 1
+          fi
+          echo "OK: build a partir de ${actual} (tag ${RELEASE_TAG})"
 
       - name: Instala toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
@@ -550,6 +780,10 @@ jobs:
     name: Draft GitHub Release (revisão humana publica)
     needs: [build-linux, build-windows, build-macos, sbom]
     runs-on: ubuntu-latest
+    # ÚNICO job com escrita: cria/atualiza a release (GH_TOKEN do workflow).
+    permissions:
+      contents: write
+      actions: read
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -561,20 +795,46 @@ jobs:
           cd artifacts
           sha256sum *.exe *.deb *.tar.gz *.zip *.cdx.json | tee SHA256SUMS
 
-      - name: Cria release DRAFT com artefatos + checksums + SBOM
+      - name: Cria (ou atualiza) a release DRAFT com artefatos + checksums + SBOM
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --draft \
-            --title "Curupira GIS $GITHUB_REF_NAME" \
-            --notes "Draft automático da tag ${GITHUB_REF_NAME}.
+          set -euo pipefail
+
+          NOTES="Draft automático da tag ${RELEASE_TAG}.
           Linux: tar.gz (GDAL do sistema) + .deb | Windows: zip portátil com
           GDAL/PROJ embutidos + instalador CurupiraGIS-Setup-x64.exe |
           macOS arm64: CurupiraGIS-macos-arm64.zip (NÃO assinado — no 1º
           uso, botão direito → Abrir, para passar pelo Gatekeeper).
           Inclui checksums SHA256SUMS e SBOM CycloneDX.
-          **Requer revisão humana antes de publicar.**" \
-            --verify-tag \
-            artifacts/*
+          **Requer revisão humana antes de publicar.**"
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Re-run do build de uma tag já existente (workflow_dispatch): a
+            # release já existe. Só é seguro ATUALIZAR um DRAFT — se ela já
+            # foi PUBLICADA, re-rodar publicaria binário por cima de uma
+            # release já distribuída (o `--clobber` sobrescreveria os assets
+            # sem aviso). Nesse caso o job FALHA: a correção é criar uma
+            # tag nova.
+            is_draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::a release ${RELEASE_TAG} já está publicada; re-rodar publicaria binário por cima — crie uma tag nova"
+              exit 1
+            fi
+            echo "::notice::release ${RELEASE_TAG} já existe (draft) — atualizando assets e notas"
+            gh release upload "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber \
+              artifacts/*
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --notes "$NOTES"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --title "Curupira GIS $RELEASE_TAG" \
+              --notes "$NOTES" \
+              --verify-tag \
+              artifacts/*
+          fi

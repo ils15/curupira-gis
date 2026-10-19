@@ -161,6 +161,56 @@ Publicação: a tag de release precisa bater com `[workspace.package] version`
 do `Cargo.toml` (ex.: `v0.1.0` == versão `0.1.0`); o workflow de release
 **falha** se não bater.
 
+### 5b. Como uma release é publicada (fluxo automático)
+
+Quatro passos, com gate humano no fim (detalhes em `README.md` §"Instalação
+e releases"):
+
+1. devs fazem **conventional commit** no `main` (`feat:`, `fix:`, `docs:`,
+   `chore:` — ver a tabela no README);
+2. o [release-please](https://github.com/googleapis/release-please) mantém um
+   *Release PR* que bumpa `[workspace.package] version` e o `CHANGELOG.md`
+   (na raiz do repo); **alguém mergeia esse PR**;
+3. o merge bumps `.release-please-manifest.json`; o job `tag` do workflow
+   `release-please` roda o script `scripts/create-release-tag.sh`, que
+   **cria a tag `vX.Y.Z`** (derivada do manifesto — tag e versão não podem
+   divergir), e o `release.yml` é disparado: ele **aguarda o CI verde do
+   mesmo commit da tag** e monta a release como **draft** com todos os assets
+   (tar.gz Linux, `.deb`, zip Windows, instalador `CurupiraGIS-Setup-x64.exe`,
+   `CurupiraGIS-macos-arm64.zip`, SBOMs e `SHA256SUMS`);
+4. **um humano clica "Publish"** — nada é publicado sem isso.
+
+O binário publicado é sempre o **do código da tag** (nunca o do `main`): o
+`release.yml` faz o checkout com `ref: <tag>` e um passo de guarda falha o
+job se o SHA do workspace não for o SHA da tag.
+
+O release-please **não** cria a release nem a tag: ele só mantém o *Release
+PR*. A tag é criada pelo script e a release *draft* é criada pelo
+`release.yml`; publicar é ato humano.
+
+Convenção de versão: `0.x` com sufixo `-alpha` (ex.: `0.3.0` → tag
+`v0.3.0-alpha.1`); o `.deb` sai como `0.3.0~alpha.1` e o instalador Windows
+como `0.3.0` (parte numérica).
+
+**Reexecutar o build de uma tag**: *Actions* → *release* → *Run workflow* →
+campo **tag** (ex.: `v0.3.0-alpha.1`) — **obrigatório** (vazio faria o
+disparo usar a branch); refaz o build e atualiza o draft sem novo push de
+tag. Se a release **já foi publicada**, o job falha de propósito
+(re-rodar sobrescreveria o binário distribuído) — crie uma tag nova.
+
+**Recuperação**: se um push novo no `main` **cancelar** o CI da tag, re-rodar
+o run de CI cancelado (*Actions* → *ci* → o run cancelado → *Re-run all
+jobs*, mesmo `run_id`) e **depois** re-rodar o `release.yml` com a mesma tag.
+Se o CI **falhou**, corrija no `main` e re-rodar o `release.yml` com a mesma
+tag (o `wait-for-ci` espera o CI do SHA da tag). O grupo de concorrência do
+`ci.yml` é **por SHA no `main`** (por *ref* no PR), então um push novo já
+não cancela o CI de um commit anterior.
+
+**Release pontual sem bump (caminho de exceção)**: bump manual de
+`[workspace.package] version` + tag manual `vX.Y.Z` no mesmo commit, e
+alinhamento de `.release-please-manifest.json` depois. Bump e tag têm que
+sair juntos — o job `verify-version` falha se divergirem.
+
 ## 6. Troubleshooting
 
 | Sintoma | Causa / solução |

@@ -3,7 +3,37 @@ name: ci
 on:
   push:
     branches: [main]
+    # Commits só de documentação não disparam o CI. ATENÇÃO: o filtro é
+    # aplicado ao conjunto de arquivos do push — um push que também muda
+    # código roda o CI normal. Não ignorar: Cargo.toml, Cargo.lock,
+    # deny.toml, .github/**, crates/**, scripts/**.
+    #
+    # Este filtro vale SÓ para o push no `main` (onde não há required
+    # checks). No `pull_request` ele foi REMOVIDO (M-3, 2026-10-19): com
+    # `paths-ignore`, um PR só de documentação não produz NENHUM check e o
+    # PR fica em "Expected — Waiting for status to be reported" (bloqueado
+    # pelo branch protection). Sem o filtro, todo PR roda o CI.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   pull_request:
+
+# Evita runs redundantes: em PR, um novo push cancela o run anterior do
+# mesmo PR.
+#
+# No `main` o grupo é por SHA (M-2, 2026-10-19): com o grupo por ref, um
+# push novo no `main` cancelava o CI do commit ANTERIOR — e era
+# justamente esse commit anterior que a tag da release apontava. O
+# `wait-for-ci` do release.yml ficava esperando um run cancelado e o
+# release não saía. Por SHA, um push novo NÃO cancela o CI do commit
+# anterior; em PR (por ref) o cancelamento continua — é o desejado
+# (push novo cancela o run antigo do mesmo PR).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.sha) || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -81,13 +111,53 @@ jobs:
 
       # A imagem postgis/postgis:16-3.4 já traz protobuf-c (necessário p/
       # ST_AsMVT) — o teste de MVT decodifica o tile real gerado pelo PG.
+      #
+      # A cobertura (Fase 6a, informativa/não-gating) e o baseline de
+      # performance (Fase 0, informativo/não-gating) foram MOVIDOS para o job
+      # `linux-pg-quality` (só em push para `main`): são pesados
+      # (instrumentação llvm + bench completo) e não-gating, então não faz
+      # sentido pagá-los em todo PR. Este job continua sendo o gate dos
+      # testes gated.
       - name: Testes gated contra o service
         run: cargo test --workspace
 
-      # Fase 6a — cobertura INFORMATIVA (não-gating). Roda contra o service
-      # PostGIS para não subestimar os repositórios de `ta-db`. A ferramenta
-      # é opcional: se o rustup/cargo install falharem (rede, runner sem
-      # llvm-tools), o step apenas avisa — nunca derruba o CI.
+  # ── PESADO: cobertura + baseline de performance ───────────────────────────
+  # Só roda em push para `main` (nunca em PR). Ambos são não-gating por
+  # desenho (ver os comentários dos steps). A cobertura é publicada como
+  # artefato; o baseline alimenta `benches/BASELINE.md`.
+  linux-pg-quality:
+    name: "main only: cobertura + baseline (não-gating, informativos)"
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      # Liga a suíte gated (pg_integration + mvt_integration).
+      TA_TEST_PG: "1"
+      TA_PG_DSN: postgres://ta:ta@localhost:5432/ta
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: ta
+          POSTGRES_PASSWORD: ta
+          POSTGRES_DB: ta
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ta -d ta"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Instala toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+
+      # ta-gis/ta-gui exigem libgdal para linkar mesmo sem usar GDAL nos
+      # testes gated — a imagem postgis não provê headers de GDAL.
+      - name: GDAL (libgdal-dev)
+        run: sudo apt-get update && sudo apt-get install -y libgdal-dev
+
       - name: cobertura (não-gating, informativa)
         continue-on-error: true
         run: |
@@ -233,3 +303,35 @@ jobs:
 
       - name: test
         run: cargo test --workspace
+
+  # ── SCRIPTS DE RELEASE (rápidos, sem rede) ───────────────────────────────
+  # Testa os scripts que implementam o fluxo de release:
+  #   * wait-for-ci.sh       — o gate que espera o CI verde do SHA da tag
+  #     (inclui os cenários de API quebrada: 500/403);
+  #   * create-release-tag.sh — o script que cria a tag a partir do manifesto
+  #     (inclui o HTTP 422 = tag já existe);
+  #   * test-workflow-refs.py — a REGRESSÃO DO B-1: todo checkout de build do
+  #     release.yml tem que usar `ref: ${{ inputs.tag || github.ref }}` e a
+  #     guarda de SHA. Sem isso, o caminho `workflow_call` compila `main` em
+  #     vez da tag (e a release sairia com o binário errado, sem erro).
+  #
+  # São testes LOCAIS: a API do GitHub é simulada por um `gh` falso, sem
+  # rede e sem toolchain Rust — latência de segundos.
+  release-scripts:
+    name: scripts de release (testes)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Testes do wait-for-ci.sh (inclui API quebrada 500/403)
+        run: bash scripts/test-wait-for-ci.sh
+
+      - name: Testes do create-release-tag.sh (inclui HTTP 422 = já existe)
+        run: bash scripts/test-create-release-tag.sh
+
+      - name: "Regressão B-1 (checkout de build com o ref: da tag)"
+        # PyYAML é opcional: o teste tem um fallback em stdlib e exige que
+        # os dois parsers concordem.
+        run: python3 scripts/test-workflow-refs.py
