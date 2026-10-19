@@ -4740,7 +4740,7 @@ dependencies = [
 
 [[package]]
 name = "ta-cli"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -4758,7 +4758,7 @@ dependencies = [
 
 [[package]]
 name = "ta-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "geo-types",
  "geozero",
@@ -4770,7 +4770,7 @@ dependencies = [
 
 [[package]]
 name = "ta-db"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "criterion",
@@ -4787,7 +4787,7 @@ dependencies = [
 
 [[package]]
 name = "ta-engine"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "geo-types",
  "ta-core",
@@ -4795,7 +4795,7 @@ dependencies = [
 
 [[package]]
 name = "ta-flow"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "geo-types",
  "serde_json",
@@ -4808,7 +4808,7 @@ dependencies = [
 
 [[package]]
 name = "ta-gis"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "csv",
  "flatgeobuf",
@@ -4830,7 +4830,7 @@ dependencies = [
 
 [[package]]
 name = "ta-gui"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "gdal",
