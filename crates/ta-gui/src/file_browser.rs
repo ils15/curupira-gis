@@ -167,7 +167,7 @@ fn spawn_walk_capped(root: PathBuf, query: String, max: usize) -> WalkJob {
     let (tx, rx) = channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_thread = Arc::clone(&cancel);
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("ta-browser-walk".into())
         .spawn(move || {
             let mut out = Vec::new();
@@ -176,8 +176,12 @@ fn spawn_walk_capped(root: PathBuf, query: String, max: usize) -> WalkJob {
             // aqui; nome case-insensitive.
             out.sort_by_key(|e| e.name.to_lowercase());
             let _ = tx.send(out);
-        })
-        .expect("spawn da thread de busca do navegador");
+        });
+    if let Err(err) = spawned {
+        // Sem thread, o `tx` cai junto com a closure e `rx` desconecta — a
+        // UI trata como busca vazia. Não derruba o processo por falha de SO.
+        eprintln!("ta-gui: falha ao iniciar a thread de busca: {err}");
+    }
     WalkJob { rx, cancel }
 }
 

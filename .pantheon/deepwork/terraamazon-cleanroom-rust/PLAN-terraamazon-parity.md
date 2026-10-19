@@ -1,0 +1,398 @@
+# PLAN — Paridade do Fluxo de Monitoramento (TerraAmazon 7.3.2, clean-room)
+
+- **Slug:** `terraamazon-cleanroom-rust`
+- **Tipo:** plano aprovado pelo usuário (registro do MNEMOSYNE)
+- **Aprovação:** 2026-10-18
+- **Repositório:** `/home/jovyan/testes/terraamazon-cleanroom-rust` (publicado em https://github.com/ils15/curupira-gis)
+- **Relação com os registros anteriores:** **não substitui** `PLAN.md` (Gate 1, v0.1.0→v0.2.2) nem as seções históricas de `STATUS.md`. É um **re-planejamento** que reusa o que já existe (workspace, licença dual, barreira clean-room, PostGIS/`sqlx`, `ta-cli`, `ta-gui`) e renumera as fases do **fluxo de monitoramento** de `0` a `6`.
+- **Estado:** **Fases 0–6 implementadas e commitadas** (`3bee087` … `e749637`, que fecha a Fase 6). Gate final do Themis (2026-10-19): **aprovado com ressalvas, 0 blockers**; o que segue em aberto está no §10.
+
+> **Proveniência / barreira clean-room.** Este documento é derivado **apenas** de documentação pública e especificação comportamental (ver `CONTRIBUTING.md`, linhas 16–29). **Nenhum** conteúdo derivado de engenharia reversa do produto legado está aqui — nem offsets, nem assembly/bytecode, nem pseudocódigo decompilado, nem schema/SQL extraído de binário, nem `hex dumps`, nem símbolos internos. As únicas menções ao material legado são de **proibição e remoção** (Decisão 1).
+
+---
+
+## 1. Objetivo
+
+Tornar o **Curupira GIS** uma **réplica funcional clean-room** do **FLUXO DE MONITORAMENTO** do TerraAmazon 7.3.2.
+
+A paridade perseguida é **comportamental, não de código**: o programa deve reproduzir o *que* o usuário observa fazer (projeto → fase → AOI → células → classes → regras → fila de processos → classificação → área → import/export → visualização), nunca *como* o produto legado implementa isso internamente.
+
+## 2. Diagnóstico raiz (por que re-planejar)
+
+Medido no repositório em 2026-10-18:
+
+| Sintoma | Medida |
+|---|---|
+| GUI-first | `crates/ta-gui`: **12.270 linhas** `.rs` (src + tests) — a maior parte do produto |
+| Domínio raso | `crates/ta-core`: **419 linhas** (tipos `Project`/`Layer`/`Feature`/`Style`) |
+| Schema raso | **3 tabelas**: `projects`, `layers`, `features` (migrações `0001`–`0004`) |
+
+Conclusão: a paridade **não** se obtém acrescentando telas sobre um domínio de 3 tabelas. Ela exige abordagem **domain-first**: modelar projeto/fase/AOI/células/classes/regras/fila como domínio testável e só então ligar UI, IO e persistência. Este plano é essa inversão.
+
+## 3. Escopo
+
+### 3.1 IN (paridade alvo)
+
+- Projeto e **fase**
+- **AOI** (área de interesse) e camadas AOI
+- **Células** (grid) e **células bloqueadas**
+- **Classes** e grupos de classes
+- **Regras / rulesets**
+- **Fila de processos** (tasks/processos e log por célula)
+- **Classificação básica** (por regras)
+- **Área** (cálculo)
+- **Import/Export** (exchange de dados do fluxo)
+- **Visualização** (AOI, células, classes no canvas)
+
+### 3.2 OUT (explicitamente fora)
+
+Raster pesado, DTM, gráficos, layout de impressão, servidor WMS/WCS, geocoding, plugin manager real, multi-usuário, bookmarks, image servers.
+
+### 3.3 Fora por barreira (não por escopo)
+
+Qualquer insumo derivado do binário/instalador legado ou de engenharia reversa (ver Decisão 1).
+
+## 4. Arquitetura alvo (crates)
+
+| Crate | Papel neste plano |
+|---|---|
+| `ta-core` | Tipos de domínio compartilhados (projeto, fase, AOI, célula, classe, regra, processo, cena) |
+| **`ta-engine` (NOVO)** | **Motor de domínio puro**: depende **apenas** de `ta-core` + `geo-types`. Sem IO, sem DB, sem GUI. Onde vive a paridade comportamental testável |
+| `ta-db` | Persistência `sqlx`/PostGIS, repositórios e migrações |
+| `ta-gis` | IO geoespacial, import/export e cálculo auxiliar |
+| `ta-gui` | Visualização e fluxo de trabalho (consome o motor; não contém regra de domínio) |
+| `ta-cli` | Automação/verificação do fluxo (doctor, seed, comandos do fluxo) |
+
+**Decisão 3** fixa: o motor é o crate **novo e puro** `ta-engine` (só `ta-core` + `geo-types`).
+
+## 5. DAG de dependências
+
+```
+Fase 0 ──► Fase 1 ──► Fase 2 ──► Fase 3 ──► Fase 5 ──► Fase 6
+                       │
+                       └──► Fase 4  (paralelizável após a Fase 1)
+```
+
+- Cadeia principal: **0 → 1 → 2 → 3 → 5 → 6**
+- **Fase 4 (scenes/exchange)** independente da 2 e da 3: pode rodar **em paralelo após a Fase 1**.
+
+## 6. Fases
+
+> **Granularidade.** Os itens de escopo, o DAG e as migrações abaixo estão fixados na aprovação. O detalhamento interno de cada fase (ordem de tarefas, nomes de comandos, campos exatos) é **derivado** do escopo aprovado e deve ser **confirmado no gate da própria fase** — não é inventado aqui como se estivesse aprovado.
+
+### Fase 0 — Usabilidade ponta a ponta — **CONCLUÍDA**
+
+Tornar o projeto utilizável de ponta a ponta **antes** de aprofundar o domínio.
+
+**Entregáveis**
+- `scripts/dev-up.sh`: provisionamento do ambiente **autodetectando docker**; se docker não existir, **fallback conda** via `scripts/test-pg.sh` (Decisão 5).
+- **doctor**: diagnóstico de ambiente (toolchain Rust, GDAL/PROJ, PostGIS, docker/conda) com saída acionável.
+- **seed-demo**: dataset de demonstração determinístico para exercitar o fluxo.
+- **baseline**: medição versionada de partida (LOC, contagem de testes, cobertura) para comparar progresso.
+- **CI não-gating**: pipeline informativo que **não bloqueia** merge enquanto a paridade é construída.
+- **docs**: documentação de setup/uso do fluxo.
+
+**Arquivos/crates afetados:** `scripts/` (`dev-up.sh`, `test-pg.sh`, seed), `.github/workflows/`, `README.md`/`INSTALL.md` (ou `docs/`), `ta-cli` (doctor/seed), eventualmente `ta-db` (dados de seed). *Sem alteração de schema.*
+
+**Critérios de aceite**
+- Um dev novo sobe o ambiente com **um comando**, em host com docker **e** em host só-conda.
+- `doctor` reporta o estado real do ambiente e o que falta instalar.
+- `seed-demo` popula o banco de forma **determinística** (reproduzível).
+- Baseline registrado e comparável.
+- CI roda como informativo **sem** bloquear.
+- Docs descrevem o fluxo ponta a ponta acima.
+
+**Riscos**
+- Docker ausente no host (mitigado pelo fallback conda — Decisão 5).
+- CI não-gating pode **mascarar regressões** (mitigação: gate local `fmt`/`clippy`/`test` antes do commit manual).
+- Deriva de ambiente (versões de GDAL/PostGIS) — pinar versões.
+
+### Fase 1 — Projeto / Fase / AOI / Células bloqueadas
+
+Base **domain-first**: o esqueleto do fluxo de monitoramento.
+
+**Entregáveis**
+- Modelo de domínio: **projeto**, **fase**, **camadas AOI**, **grid de células**, **células bloqueadas**.
+- Persistência e repositórios correspondentes.
+- Comandos de CLI para criar/consultar o fluxo.
+- **`ta-engine` criado** (crate puro) com grid/resolução/área.
+
+**Migrações:** `0005_phases`, `0006_aoi_cells`, `0007_grid_srid` (retificação da Decisão 4 em 2026-10-18).
+**Tabelas (nomes próprios, Decisão 2):** `phases`, `area_settings`, `app_meta`; `aoi_layers`, `cell_layers`, `cells`, `blocked_cells`.
+**Crates:** `ta-core` (tipos), **`ta-engine` (novo)**, `ta-db` (repos + migrações), `ta-cli`.
+
+**Critérios de aceite**
+- Criar projeto e fase; definir AOI; **gerar grid de células**; **bloquear** células.
+- Geometria persistida em **EPSG:4674**; a grade é configurável em **qualquer EPSG** (resolução/origem nas unidades do SRS escolhido) e a **área** usa o SRS de `area_settings.srs_id` (default EPSG:5880) — Decisão 4 retificada em 2026-10-18.
+- Motor puro coberto por testes unitários (sem DB); persistência coberta por integração PG.
+
+**Riscos**
+- Escolha do SRS da grade (graus vs metros) — critério objetivo agora é do usuário (`--srid`), com teste de paridade motor↔PostGIS.
+- Performance do grid em AOI grande (não otimizar antes de medir).
+
+### Fase 2 — Classes e regras (rules/rulesets)
+
+**Entregáveis**
+- Classes e **grupos de classes**; **camadas de rascunho** de classificação.
+- **Regras** e **rulesets** (versionados).
+- Avaliação de regra sobre célula **no motor puro** (testável sem DB/GUI).
+
+**Migrações:** `0009_classes`, `0010_rules`.
+**Tabelas:** `classes`, `class_groups`, `draft_layers`; `rules`, `rulesets`.
+**Crates:** `ta-core`, `ta-engine` (avaliação), `ta-db`, `ta-cli`.
+
+**Critérios de aceite**
+- CRUD de classes/grupos e de rules/rulesets.
+- Motor avalia regra → decisão de classe de forma **pura e determinística** (testes unitários).
+
+**Riscos**
+- Escopo de "regra" pode inflar (YAGNI): manter conjunto mínimo que a paridade comportamental exige.
+
+### Fase 3 — Fila de processos + classificação básica
+
+**Entregáveis**
+- **Fila de processos**: `tasks`, `processes` e **log por célula** (`cell_log`).
+- **Classificação básica** executada pelo motor, com estado retomável.
+- Comandos de CLI para enfileirar/acompanhar.
+
+**Migração:** `0012_queue`.
+**Tabelas:** `tasks`, `processes`, `cell_log`.
+**Crates:** `ta-engine` (execução), `ta-db`, `ta-cli`.
+
+**Requisito de integridade multi-projeto (registrado na revisão da Fase 2,
+2026-10-18 — implementar NESTA fase):** triggers `BEFORE INSERT/UPDATE`
+comparando `project_id` entre pais e filhos — `rules.class_id ↔
+rulesets.project_id` (regra de projeto cruzado hoje é barrada só no
+repositório), `classes.class_group_id` e `classes.parent_id` — garantia no
+banco para a fila de processos escrever sem corruption cruzada.
+
+**Critérios de aceite**
+- Enfileirar processo por célula; executar; registrar log por célula; refletir estado (pendente/em execução/concluído/erro).
+
+**Riscos**
+- Concorrência/retomada da fila — manter modelo simples e observável nesta fase.
+
+### Fase 4 — Scenes e exchange — **paralelizável após a Fase 1**
+
+**Entregáveis**
+- Registro de **scenes** e vínculo com o projeto (`project_scenes`).
+- **Import/Export** de exchange do fluxo.
+
+**Migração:** `0014_scenes`.
+**Tabelas:** `scenes`, `project_scenes`.
+**Crates:** `ta-core`, `ta-db`, `ta-gis` (IO), `ta-cli`.
+
+**Registro da revisão da Fase 3 (2026-10-19):** `cell_measures` (criada na
+`0013`) ganhará nesta fase proveniência por cena — coluna `scene_id` NULL
+com FK → `scenes` (medida pode existir sem cena: observação importada a
+dedo). Política de concorrência **last-write-wins** por
+`(cell_layer, cell_id, measure)` documentada na migração — a **PK permanece
+inalterada** (a cena é proveniência da observação, não chave da medida).
+
+**Critérios de aceite**
+- Cadastrar cena e vinculá-la ao projeto; importar/exportar o exchange com round-trip verificado.
+
+**Riscos**
+- Amplitude do formato de exchange (manter mínimo e documentado).
+
+### Fase 5 — Área, import/export e visualização
+
+Integração do fluxo completo na interface e consolidação de **área**.
+
+**Entregáveis**
+- **Cálculo de área** consolidado (em **EPSG:5880** ou `geography`, Decisão 4).
+- **Import/Export** integrados ao fluxo.
+- **Visualização** de AOI, células (bloqueadas/incluídas) e classes no canvas.
+
+**Crates:** `ta-gis`, `ta-db`, `ta-gui`, `ta-cli`.
+**Depende de:** Fases 3 e 4.
+
+**Registro da revisão da Fase 3 (2026-10-19):** o executor de task hoje mora
+em `ta-cli` (`flow_task::task_run`, lotes transacionais claim → medidas →
+`classify_batch` → draft/log/finish). A GUI precisará dele: **extrair para
+crate próprio** (ex.: `ta-flow`, dependendo de `ta-db` + `ta-engine` +
+`ta-core`) **ANTES** de plugar o banco na GUI (DbCmd) — sem duplicar a
+lógica de fila/retomada em dois lugares.
+
+**Critérios de aceite**
+- Fluxo ponta a ponta executável pela GUI **e** pela CLI, com resultados consistentes.
+- Área calculada de forma verificável (teste de ordem de magnitude em 5880 vs 4674).
+
+**Riscos**
+- `ta-gui` crescer como dono de regra de domínio — a regra **deve** ficar no `ta-engine`.
+
+### Fase 6 — Paridade comportamental e fechamento
+
+**Entregáveis**
+- **Matriz de paridade comportamental** contra **documentação pública** (checklist observável, sem material legado).
+- Documentação final do fluxo.
+- Fechamento das metas de qualidade (§8).
+
+**Critérios de aceite**
+- Cada item IN (§3.1) com evidência de comportamento observável documentada.
+- Metas do §8 atingidas ou desvios registrados honestamente.
+
+**Riscos**
+- Alegar "paridade" além da evidência — a matriz deve distinguir **verificado** de **não verificado**.
+
+## 7. Migrações planejadas
+
+Sequência (continua `0001`–`0004` já existentes):
+
+| Migração | Fase | Conteúdo previsto (nomes próprios) |
+|---|---|---|
+| `0005_phases` | 1 | `phases`, `area_settings`, `app_meta` |
+| `0006_aoi_cells` | 1 | `aoi_layers`, `cell_layers`, `cells`, `blocked_cells` |
+| `0007_grid_srid` | 1 | `cell_layers.srid` (SRS da grade; retificação da Decisão 4, 2026-10-18) |
+| `0008_cell_validity` | 1 | trigger `cells_geom_validity` (rejeita célula inválida; mesmo gate de `features`) |
+| `0009_classes` | 2 | `classes`, `class_groups`, `draft_layers` |
+| `0010_rules` | 2 | `rules`, `rulesets` |
+| `0011_rule_class_restrict` | 2 | FK `rules.class_id` recriada com `ON DELETE RESTRICT` (nada de cascata silenciosa; `class delete --force` é o caminho explícito) |
+| `0012_queue` | 3 | `tasks`, `processes`, `cell_log` |
+| `0013_drafts_measures` | 3 | `draft_cells`, `cell_measures`, `rulesets.is_active` + gatilhos F5 de integridade multi-projeto |
+| `0014_scenes` | 4 | `scenes`, `project_scenes` |
+
+Todas usam **nomes próprios, sem prefixo legado** (Decisão 2). Geometria em **EPSG:4674**; a grade é configurável em **qualquer EPSG** (resolução/origem nas unidades do SRS escolhido) e a **área** usa o SRS de `area_settings.srs_id` (Decisão 4 retificada em 2026-10-18).
+
+**Backfill da 0007 (intencional):** em bancos que aplicaram a `0006` da
+iteração anterior (antes de `cell_layers.srid` existir), a `0007` adiciona a
+coluna com `DEFAULT 4674` e faz backfill de todas as linhas para 4674. É o
+valor correto para grades antigas (todas eram em graus) e bancos de dev podem
+ser recriados; não há migração de dados a fazer.
+
+**Semântica de borda do recorte (para quem reimplementar em SQL):** o
+`generate_grid` inclui a célula pelo centro e trata o envelope como
+**semiaberto** `[x_min, x_max) × [y_min, y_max)` — aresta de máximo fica fora.
+`ST_Contains`/`ST_Covers` do PostGIS **não** são equivalentes nessa fronteira
+(ambos cobrem o limite), então o recorte em SQL deve usar comparação
+semiaberta (`>=` no mínimo, `<` no máximo), nunca essas funções.
+
+## 8. Metas de qualidade
+
+- **Cobertura:** **70% global**; **85%** em **`ta-engine`** e nos **repositórios de `ta-db`**.
+- **Zero `unwrap`/`expect`** em **libs não-teste**.
+
+## 9. Decisões aprovadas (registradas para não serem relitigadas)
+
+| # | Decisão |
+|---|---|
+| **1 (a)** | A paridade é validada **apenas** por **documentação pública + observação comportamental**. É **PROIBIDO** usar engenharia reversa do produto legado. Por política clean-room (`CONTRIBUTING.md`), **todo** o material proibido foi **removido do disco em 2026-10-18** por decisão do usuário. Nenhum insumo derivado de engenharia reversa do produto legado pode entrar neste repositório. |
+| **2 (sim)** | **Nomes de tabela próprios**, sem prefixo legado: `phases`, `aoi_layers`, `cell_layers`, `cells`, `blocked_cells`, `classes`, `class_groups`, `rules`, `rulesets`, `tasks`, `processes`, `cell_log`, `draft_layers`, `scenes`, `project_scenes`, `area_settings`, `app_meta`. |
+| **3** | **Motor de domínio em crate NOVO e puro `ta-engine`** — depende **apenas** de `ta-core` + `geo-types`; **sem IO, sem DB, sem GUI**. |
+| **4** | Decisão 4 (retificada pelo usuário em 2026-10-18): a grade é configurável em QUALQUER EPSG — resolução e origem nas unidades do SRS escolhido; armazenamento canônico das células em EPSG:4674; cálculo de área no SRS de `area_settings.srs_id` (default EPSG:5880). Não há escolha excludente entre graus e metros. |
+| **5** | Provisionamento na **Fase 0** via `scripts/dev-up.sh` **autodetectando docker**, com **fallback conda** (`scripts/test-pg.sh`). |
+
+**Diagnóstico que fundamenta o plano:** projeto GUI-first (**12.270** linhas de UI) sobre domínio raso (**3 tabelas**: `projects`/`layers`/`features`; `ta-core` com **419** linhas) ⇒ a paridade **exige** abordagem **domain-first**.
+
+## 10. Registro de não-progresso (honestidade)
+
+- **Fase 0**: concluída (2026-10-17/18).
+- **Fase 1**: **implementada e revisada** (Themis: aprovada com ressalvas em
+  2026-10-18); os achados de fechamento foram aplicados e a fase **aguarda
+  commit** (migrações `0005`–`0008`, CLI `phase`/`aoi`/`grid`/`cell`, seed).
+- **Fase 2**: **implementada e revisada** (Themis, 2026-10-18); achados
+  aplicados, **aguarda commit** (`0009_classes`, `0010_rules`,
+  `0011_rule_class_restrict`, motor puro de regras).
+- **Fase 3**: **implementada e revisada** (Themis, 2026-10-18/19); achados
+  aplicados, **aguarda commit** (`0012_queue`, `0013_drafts_measures`,
+  fila/classificação na CLI — `measure`/`task`/`process`/`cell log`).
+- **Fase 4**: **implementada e revisada** (2026-10-19; `0014_scenes`,
+  `ta-gis::exchange` dono do formato
+  `curupira-monitoring-exchange v1`, `exchange export/import`, `scene
+  add/list/link/unlink/remove`, `measure set --scene`; round-trip E2E
+  verificado com contagens, igualdade geométrica e mesma decisão de
+  `rule eval`). **Achados da revisão aplicados** (ver STATUS.md, seção
+  "Fechamento da Fase 4"): import ATÔMICO em transação única (falha não
+  deixa projeto parcial; retry funciona), `project delete --yes` com
+  deleção ordenada e relatório de contagens por tabela (cena global
+  sobrevive), aviso de cena reaproveitada com footprint/metadata
+  divergentes, `float_roundtrip` no serde_json, mensagens de ciclo de
+  classe e de footprint não-poligonal repaginadas. **Aguarda commit**.
+- **Fase 5 (5a + 5b): concluída e commitada** (`318e7fe` / `75d921d`) —
+  `ta-flow` extraído (CLI e GUI usam o mesmo executor), área consolidada e
+  fluxo completo pela GUI (painel de monitoramento/canvas). 368 testes na
+  ocasião.
+- **Fase 6a (hardening/métricas): CONCLUÍDA** (2026-10-19; commitada pelo
+  usuário em `e749637`). Fechado:
+  - dívida de teste do `reset_demo` **corrigida** (reset pelo caminho
+    ordenado `project delete --yes`, com teste de regressão para projeto
+    demo COM ruleset+regra+task executada; suíte gated 2× estável);
+  - cobertura medida com Postgres real: **73,48% global** (15 657/21 309),
+    **98,53%** em `ta-engine` (874/887) e **92,61%** nos `repo_*.rs` de
+    `ta-db` (2 104/2 272; `ta-db` inteiro 91,97%) — metas do §8 atingidas
+    com o método registrado no STATUS;
+  - `unwrap`/`expect` em código não-teste: **0** (7 ocorrências reais
+    corrigidas; `unwrap_or`/testes não contam);
+  - `cargo deny check`: advisories/bans/licenses/sources **ok** (2 warnings
+    de licença não usada: `CC0-1.0`, `Unicode-DFS-2016`, ambos transitivos);
+  - CI ganhou cobertura **não-gating** com artefato (lcov/html), condicionada
+    à ferramenta; release confirma os DOIS binários e migrações embutidas
+    sem `DATABASE_URL`;
+  - benchmarks re-medidos em banco limpo e registrados em
+    `benches/BASELINE.md` (sem regressão conclusiva; MVT continua não
+    medido neste host por falta de protobuf-c).
+- **Fase 6b (matriz de paridade + documentação final): CONCLUÍDA**
+  (2026-10-19; commitada pelo usuário em `e749637`) — `docs/PARITY.md` revisado
+  (10 itens IN com evidência, OUT/barreira separados), `README.md`,
+  `STATUS.md`, `PARITY-MATRIX.md` e `benches/BASELINE.md` atualizados com
+  **369 testes** em 35 alvos (21 integração + 7 unit + 7 doc-tests), 3 testes
+  de MVT auto-pulados neste host, cobertura 73,48%/98,53%/92,61% e os números
+  de bench do §Fase 6a. Achados do gate do Themis aplicados: comando do
+  round-trip `ta-gis` com `--features gdal,geojson,csv` (9/9; sem features o
+  binário compilava 0 testes), `MAX_CELLS` separado em teto do motor
+  (5 000 000) vs. teto de negócio default (1 000 000), contagem de
+  `draft_layers` no `project delete` corrigida (ordem + regressão), fixture
+  `testdata/monitoring/medidas.csv`, e formulação honesta sobre MVT
+  auto-pulado (3 testes) em vez de "0 skipped".
+- **Gate final do Themis (2026-10-19): APROVADO COM RESSALVAS, 0 blockers.**
+  Os achados **M1/M2** e **m1–m7** do gate foram **aplicados** nesta fase —
+  são os itens listados no bullet da Fase 6b acima (comando do round-trip
+  `ta-gis` com `--features`, separação `MAX_CELLS`, contagem de
+  `draft_layers` no `project delete`, fixture `medidas.csv`, `task run` com
+  todas as células elegíveis, e formulação honesta do auto-pulo de MVT). As
+  ressalvas que o gate deixou abertas estão registradas em "O que segue
+  honestamente em aberto" abaixo — nenhuma foi fechada por declaração.
+- **O que segue honestamente em aberto depois da Fase 6** (não fechado, sem
+  número inventado):
+  1. **MVT sem prova real neste host** — o PostGIS conda-forge não traz
+     protobuf-c, então os 3 testes de MVT se auto-pulam (com mensagem). A
+     prova real depende do job `linux-pg` do CI (imagem
+     `postgis/postgis:16-3.4`).
+  2. **Dedup de helpers de teste (n7/n8/n13)** — adiado; a corrida entre
+     testes do `demo` foi resolvida com um mutex de teste, o que **não** é
+     dedup.
+  3. **Inspeção visual humana** — não feita (o host de referência não tem
+     display); a visualização está verificada por contrato headless, e por
+     isso o item 10 da matriz (`docs/PARITY.md`) fica ⚠️ parcial.
+  4. **Escala 1M de células** — nem o teto do motor (`MAX_CELLS = 5 000 000`)
+     nem o teto de negócio default (`projects.max_cells = 1 000 000`) foram
+     medidos; o bench cobre 10 000 feições.
+- Nada foi commitado por este registro (o usuário faz commits manualmente); a
+  Fase 6 já está commitada em `e749637`.
+- Nenhum ADR foi criado (não solicitado).
+
+## 11. Riscos transversais
+
+1. **Contaminação clean-room** — mitigada pela barreira em `CONTRIBUTING.md` + deny-list; qualquer material derivado do legado é rejeição automática de PR.
+2. **Alegar paridade além da evidência** — mitigado pela matriz de paridade da Fase 6 (verificado ≠ não verificado).
+3. **UI absorver regra de domínio** — mitigado pela Decisão 3 (`ta-engine` puro).
+4. **Deriva de versões** (GDAL/PostGIS/rust) — pinar e verificar no `doctor`.
+5. **Escopo inflando além do IN** (§3.1) — itens OUT (§3.2) permanecem fora.
+6. **FK para `spatial_ref_sys` exige privilégio** — a `0007` cria
+   `cell_layers.srid → spatial_ref_sys(srid)`. Se o PostGIS foi criado por
+   outro role, a migração falha com `permission denied` e é preciso
+   `GRANT REFERENCES ON spatial_ref_sys TO <app_role>;` (ou criar a extensão
+   com o role da aplicação) — ver `INSTALL.md`.
+7. **FK RESTRICT sem caminho de saída (padrão M1, permanente)** — toda FK
+   `ON DELETE RESTRICT` nova deve vir acompanhada de: **pré-checagem** no
+   comando (contagem + nomes), **mensagem acionável** e **caminho de saída
+   explícito** (ex.: apagar o dependente com comando próprio ou repetir com
+   `--force`, que apaga numa única transação com contagens reportadas).
+   Padrão estabelecido no fechamento da Fase 3 (`draft_cells` →
+   `draft delete` / `--force`); delete bloqueado sem dizer "como sair" é
+   falha de operação, não rigor. **Reafirmado no fechamento da Fase 4
+   (2026-10-19):** o mesmo padrão vale na ESCALA do projeto inteiro —
+   `project delete --yes` (deleção ordenada em transação única, respeitando
+   RESTRICT sem desativar trigger, com relatório de contagens) é o caminho
+   de saída canônico do import falho e de qualquer projeto rico; a
+   pré-checagem sem `--yes` mostra as contagens por tabela antes de decidir.

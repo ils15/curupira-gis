@@ -3,6 +3,14 @@
 //! - [`pool`]: pool de conexões PostgreSQL/PostGIS (sqlx, tokio).
 //! - [`repo`]: traits de repositório async — um só contrato para PostGIS
 //!   (padrão) e GPKG offline (feature `offline-gpkg`, opt-in).
+//! - [`repo_phase`], [`repo_aoi`], [`repo_cell`]: repositórios do fluxo de
+//!   monitoramento (fase, AOI/área, camadas de células/células/bloqueios).
+//! - [`repo_area`]: cálculo de área consolidado no SRS métrico do projeto
+//!   (Fase 5, Decisão 4 — nunca em graus).
+//! - [`repo_class`], [`repo_ruleset`]: classes/grupos/rascunhos e
+//!   rulesets versionados/regras (Fase 2).
+//! - [`repo_task`]: fila de processos — tasks, processos por célula, log por
+//!   célula, medidas e gravação de rascunho (Fase 3).
 //! - [`spatial`]: utilitários espaciais do banco (DDL, COPY BINARY, MVT).
 //! - [`ops`]: processamento espacial server-side (buffer/interseção/união —
 //!   camadas derivadas, v0.2 GUI).
@@ -14,6 +22,19 @@ pub mod error;
 pub mod ops;
 pub mod pool;
 pub mod repo;
+pub mod repo_aoi;
+pub mod repo_area;
+pub mod repo_cell;
+pub mod repo_class;
+pub mod repo_phase;
+pub mod repo_ruleset;
+pub mod repo_scene;
+pub mod repo_task;
 pub mod spatial;
 
 pub use error::{Error, Result};
+// Re-export do sqlx para os crates internos (ex.: `ta-flow`) usarem os tipos
+// de conexão (`PgPool`, `PgConnection`) SEM declarar dependência própria — o
+// grafo normal fica core/db/engine apenas (uma única versão de sqlx no
+// workspace; nenhuma aresta nova).
+pub use sqlx;

@@ -16,11 +16,19 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 ta-core.workspace = true
+ta-engine.workspace = true
 ta-db.workspace = true
+ta-flow.workspace = true
 ta-gis.workspace = true
 sqlx.workspace = true
 time.workspace = true
 tokio.workspace = true
+# Mock de `ProjectRepo` no teste de `resolve_project` (F12).
+async-trait.workspace = true
+# Geometria + JSON dos dados sintéticos do `seed-demo` (células da grade e
+# atributos de classe) — não são reexportados por ta-core.
+geo-types.workspace = true
+serde_json.workspace = true
 
 [features]
 # Defaults do CLI: IO completo + banco. WMS fica opt-in (`--features wms`).

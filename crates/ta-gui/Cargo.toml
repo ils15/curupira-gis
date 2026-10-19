@@ -16,6 +16,9 @@ homepage.workspace = true
 eframe.workspace = true
 ta-core.workspace = true
 ta-db.workspace = true
+# Executor do fluxo (fila/classificação + relatório de área) compartilhado com
+# a CLI — a GUI orquestra, mas NÃO reimplementa regra de domínio (Fase 5b).
+ta-flow.workspace = true
 # GDAL (SHP/GeoJSON/GPKG + GeoTIFF) e CSV-XY são caminhos de import do GUI;
 # libgdal é link dinâmico (pré-requisito do host, ver README).
 # `geojson` alimenta a exportação da camada ativa (menu Arquivo → Exportar).

@@ -1,0 +1,14 @@
+[package]
+name = "ta-engine"
+description = "Motor de domínio PURO do terraamazon-cleanroom-rust: grade de células sobre uma AOI. Sem IO, sem DB, sem GUI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Decisão 3 do plano: o motor depende SÓ de ta-core + geo-types.
+# Sem sqlx, sem tokio, sem IO, sem GUI.
+ta-core.workspace = true
+geo-types.workspace = true

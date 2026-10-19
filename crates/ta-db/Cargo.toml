@@ -10,18 +10,29 @@ authors.workspace = true
 [dependencies]
 ta-core.workspace = true
 async-trait.workspace = true
+geo-types.workspace = true
 thiserror.workspace = true
 time.workspace = true
 serde_json.workspace = true
-# Macros query! ficam DESLIGADAS de propósito (risco R2: sem DATABASE_URL em
-# build) — só API runtime (sqlx::query / raw_sql / Migrator).
-sqlx = { workspace = true, features = ["time", "json", "migrate"] }
+# Macros `query!` ficam DESLIGADAS de propósito (risco R2: sem DATABASE_URL em
+# build). `macros` aqui habilita SOMENTE `sqlx::migrate!`, que embute os
+# arquivos de migração no binário em tempo de compilação (os dados empacotados
+# funcionam fora do checkout de build) e não consulta banco no build.
+sqlx = { workspace = true, features = ["time", "json", "migrate", "macros"] }
 
 rusqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 geo-types.workspace = true
+ta-engine.workspace = true
+# Harness do baseline de performance (Fase 0). Sem `plotters`/`rayon`: só o
+# runner textual entra no grafo (menos deps, sem geração de HTML).
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "ta_db_baseline"
+harness = false
 
 [features]
 default = []

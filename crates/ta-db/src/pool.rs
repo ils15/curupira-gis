@@ -1,5 +1,7 @@
 //! Pool de conexões PostgreSQL/PostGIS (sqlx + tokio).
 
+use std::time::Duration;
+
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
@@ -23,8 +25,20 @@ impl Default for DbConfig {
 
 /// Abre o pool de conexões. Falha rápido se o banco não estiver acessível.
 pub async fn connect(cfg: &DbConfig) -> sqlx::Result<PgPool> {
+    connect_with_timeout(cfg, DEFAULT_ACQUIRE_TIMEOUT).await
+}
+
+/// Timeout padrão de aquisição de conexão (o mesmo default do sqlx).
+pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Abre o pool com `acquire_timeout` explícito.
+///
+/// O diagnóstico (`ta-cli doctor`) usa um timeout curto: esperar 30 s para
+/// dizer "o banco não responde" é péssima usabilidade com o banco fora do ar.
+pub async fn connect_with_timeout(cfg: &DbConfig, timeout: Duration) -> sqlx::Result<PgPool> {
     PgPoolOptions::new()
-        .max_connections(cfg.max_connections)
+        .max_connections(cfg.max_connections.max(1))
+        .acquire_timeout(timeout)
         .connect(&cfg.url)
         .await
 }

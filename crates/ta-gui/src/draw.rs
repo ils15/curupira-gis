@@ -104,6 +104,74 @@ pub fn draw_raster(
     );
 }
 
+/// Desenha uma célula da grade no canvas (Fase 5b): preenchimento pela classe
+/// decidida (ou cinza de bloqueio), contorno fino e um "X" quando bloqueada.
+///
+/// Células são quadriláteros (convexos) — `convex_polygon` é o caminho barato
+/// do epaint. O "X" usa os vértices 0–2 e 1–3 (dentro do quadrilátero), o que
+/// dá a marca de hachura sem depender de clipping de padrão.
+pub fn draw_cell(
+    painter: &egui::Painter,
+    canvas: Rect,
+    vp: &Viewport,
+    poly: &geo_types::Polygon<f64>,
+    fill: Color32,
+    blocked: bool,
+    selected: bool,
+) {
+    let mut pts: Vec<Pos2> = poly
+        .exterior()
+        .0
+        .iter()
+        .map(|c| world_to_canvas(canvas, vp, c.x, c.y))
+        .collect();
+    // Anel do banco vem fechado (último == primeiro); o `convex_polygon`
+    // fecha sozinho e um vértice duplicado degenera triângulos.
+    if pts.len() > 3 && pts.first() == pts.last() {
+        pts.pop();
+    }
+    if pts.len() < 3 {
+        return;
+    }
+    let bounds = Rect::from_points(&pts);
+    if !bounds.intersects(canvas) {
+        return; // célula fora da viewport (pan antes da nova consulta)
+    }
+    let stroke = if selected {
+        Stroke::new(2.5, Color32::YELLOW)
+    } else {
+        Stroke::new(0.5, Color32::from_rgba_unmultiplied(40, 40, 40, 120))
+    };
+    painter.add(Shape::convex_polygon(pts.clone(), fill, stroke));
+    if blocked && pts.len() >= 4 {
+        let hatch = Stroke::new(1.0, Color32::from_rgba_unmultiplied(30, 30, 30, 200));
+        painter.line_segment([pts[0], pts[2]], hatch);
+        painter.line_segment([pts[1], pts[3]], hatch);
+    }
+}
+
+/// Contorno de um polígono (AOI selecionada) — sem preenchimento, para não
+/// competir com as cores das células.
+pub fn draw_outline(
+    painter: &egui::Painter,
+    canvas: Rect,
+    vp: &Viewport,
+    poly: &geo_types::Polygon<f64>,
+    color: Color32,
+    width: f32,
+) {
+    let ring: Vec<Pos2> = poly
+        .exterior()
+        .0
+        .iter()
+        .map(|c| world_to_canvas(canvas, vp, c.x, c.y))
+        .collect();
+    if ring.len() < 2 {
+        return;
+    }
+    painter.add(Shape::closed_line(ring, Stroke::new(width, color)));
+}
+
 /// Desenha uma geometria qualquer (todas as variantes de `Geometry`).
 pub fn draw_geometry(
     painter: &egui::Painter,

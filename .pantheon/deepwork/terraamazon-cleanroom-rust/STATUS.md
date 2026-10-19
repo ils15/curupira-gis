@@ -5,6 +5,7 @@
 - **Gate 1:** **APROVADO** pelo usuário (2026-10-16)
 - **Modelo IA:** GLM-5.3-Flash (z.ai) para todos os agentes
 - **Repositório:** `/home/jovyan/testes/terraamazon-cleanroom-rust` → publicado em https://github.com/ils15/curupira-gis (commit `3b3eaa8`, tag `v0.1.0-alpha`, 2026-10-16)
+- **Re-planejamento (2026-10-18):** aprovado o plano de **paridade do fluxo de monitoramento** (fases `0`–`6`) → ver `.pantheon/deepwork/terraamazon-cleanroom-rust/PLAN-terraamazon-parity.md` e a seção final deste arquivo. **A Fase 0 desse novo plano está concluída; a Fase 1 está implementada e revisada (aguardando commit); as Fases 2–6 estão pendentes.** As seções históricas abaixo (v0.1–v0.2.2) permanecem válidas e **não** foram alteradas.
 
 ## Decisões (Gate 1, 2026-10-16)
 
@@ -975,3 +976,681 @@ Run [39048582185](https://api.github.com/repos/ils15/curupira-gis/actions/runs/3
 ### Não commitado
 
 Nada commitado (instrução). Modificado: `deny.toml`, este STATUS.md. Arquivos para @iris: `deny.toml` (commit no push de fix).
+
+---
+
+## Re-planejamento — PLANO DE PARIDADE DO FLUXO DE MONITORAMENTO (@mnemosyne, registro em 2026-10-18)
+
+Plano **aprovado pelo usuário** registrado como artefato em
+`PLAN-terraamazon-parity.md` (mesma pasta). Este é um **re-planejamento
+domain-first**; não substitui nem reescreve o histórico v0.1–v0.2.2 acima.
+
+### Resumo do que foi aprovado
+
+- **Objetivo:** Curupira GIS → réplica funcional **clean-room** do **fluxo de
+  monitoramento** do TerraAmazon 7.3.2 (paridade **comportamental**, não de código).
+- **Diagnóstico raiz (medido):** GUI-first — `ta-gui` **12.270** linhas `.rs`
+  (src+tests) sobre domínio raso (`ta-core` **419** linhas; **3 tabelas**:
+  `projects`/`layers`/`features`) ⇒ a paridade exige abordagem **domain-first**.
+- **Escopo IN:** projeto/fase/AOI/células bloqueadas/classes/regras-rulesets/fila
+  de processos/classificação básica/área/import-export/visualização.
+  **OUT:** raster pesado, DTM, gráficos, layout de impressão, servidor WMS/WCS,
+  geocoding, plugin manager real, multi-usuário, bookmarks, image servers.
+- **DAG:** `0 → 1 → 2 → 3 → 5 → 6`, com a **Fase 4** (scenes/exchange)
+  **paralelizável após a Fase 1**.
+- **Arquitetura:** crate **novo e puro `ta-engine`** (só `ta-core` + `geo-types`;
+  sem IO/DB/GUI).
+- **Migrações:** `0005_phases`, `0006_aoi_cells`,
+  `0007_grid_srid` (retificação da Decisão 4 em 2026-10-18),
+  `0008_cell_validity` (gate de validade em `cells`), `0009_classes`,
+  `0010_rules`, `0011_rule_class_restrict` (Fase 2 — FK
+  `rules.class_id` com `ON DELETE RESTRICT`), `0012_queue`, `0013_drafts_measures`,
+  `0014_scenes`.
+- **Metas:** cobertura **70% global / 85%** em `ta-engine` e repos de `ta-db`;
+  **zero `unwrap`/`expect`** em libs não-teste.
+
+### Decisões registradas (não relitigar)
+
+1. **(1 = a)** Paridade validada **apenas** por **documentação pública +
+   observação comportamental**. Por política clean-room (`CONTRIBUTING.md`),
+   **proibida** engenharia reversa do produto legado e **todo** o material
+   proibido foi **removido do disco em 2026-10-18** por decisão do usuário;
+   nenhum insumo derivado de engenharia reversa do produto legado entra no
+   repositório.
+2. **(2 = sim)** Nomes de tabela **próprios**, sem prefixo legado: `phases`,
+   `aoi_layers`, `cell_layers`, `cells`, `blocked_cells`, `classes`,
+   `class_groups`, `rules`, `rulesets`, `tasks`, `processes`, `cell_log`,
+   `draft_layers`, `scenes`, `project_scenes`, `area_settings`, `app_meta`.
+3. **(3)** Motor de domínio no crate **novo e puro `ta-engine`**.
+4. **(4)** Decisão 4 (retificada pelo usuário em 2026-10-18): a grade é
+   configurável em QUALQUER EPSG — resolução e origem nas unidades do SRS
+   escolhido; armazenamento canônico das células em EPSG:4674; cálculo de área
+   no SRS de `area_settings.srs_id` (default EPSG:5880). Não há escolha
+   excludente entre graus e metros.
+5. **(5)** Provisionamento na Fase 0 via `scripts/dev-up.sh` **autodetectando
+   docker**, com **fallback conda** (`scripts/test-pg.sh`).
+
+### Estado real (sem inflar progresso)
+
+| Fase | Escopo | Estado |
+|---|---|---|
+| 0 | Usabilidade ponta a ponta (dev-up.sh, doctor, seed-demo, baseline, CI não-gating, docs) | **concluída** (2026-10-17/18) |
+| 1 | Projeto / Fase / AOI / Células bloqueadas (`0005`, `0006`, `0007`, `0008`) | **implementada e revisada** (Themis, 2026-10-18: aprovada com ressalvas); achados aplicados, **aguardando commit** |
+| 2 | Classes e regras/rulesets (`0009`, `0010`, `0011_rule_class_restrict`) | **implementada; revisão Themis aplicada** (2026-10-18), **aguardando commit** |
+| 3 | Fila de processos + classificação básica (`0012_queue`, `0013_drafts_measures`) | **implementada; revisão Themis aplicada** (2026-10-18/19), **aguardando commit** — 306 testes; 13/13 migrações; grade de 118 células; retomada e claim concorrente provados |
+| 4 | Scenes / exchange (`0014_scenes`) — paralelizável após a Fase 1 | **implementada, revisada e commitada** (`e7feb87`) |
+| 5 | Área, import/export e visualização (5a + 5b) | **concluída e commitada** (`318e7fe`, `75d921d`) |
+| 6 | Paridade comportamental e fechamento | **concluída** (6a + 6b, 2026-10-19, sem commit): métricas/hardening + matriz e docs finais |
+
+**Fases 0–6 concluídas.** Nenhum ADR criado (não solicitado). A matriz de
+paridade está em `docs/PARITY.md` (versão de trabalho em
+`PARITY-MATRIX.md`).
+
+### Fechamento da revisão da Fase 1 (2026-10-18)
+
+Themis aprovou com ressalvas; os achados de fechamento foram aplicados:
+
+- `0008_cell_validity`: trigger `cells_geom_validity` (BEFORE INSERT OR UPDATE)
+  rejeita `NOT ST_IsValid(geom)` com mensagem acionável — mesma política de
+  `features`, sem reparo silencioso. Idempotente. As migrações **futuras**
+  foram renumeradas: classes `0009`, rules `0010`, e (Fase 2 em diante)
+  `0011_rule_class_restrict`, queue `0012`, drafts/measures `0013`, scenes `0014`.
+- `bulk_insert` de células roda em **transação única** (falha em qualquer lote
+  não deixa grade parcial — o seed decide idempotência por `count > 0`).
+- `bulk_insert`/`bulk_insert_on` exigem `srid` **explícito** e o validam contra
+  `cell_layers.srid` (`SridLayerMismatch`), em vez de reprojetar lixo calado.
+- `seed-demo` imprime o id de `aoi_layers` (não o de `layers`) e reporta a
+  contagem real de células após o insert.
+- `grid info` rotula o SRS da origem e o da extensão (armazenamento 4674).
+- `--srid -1` passa pelo clap nos dois formatos e cai na validação acionável
+  (idem para origens negativas, ex.: `--origin-x -52.2`); `--help` sem markdown
+  vazando (`**`).
+- Teste métrico com tolerância **1e-6 m** e comparação **célula a célula**
+  (4674→5880 vs. motor puro), além do envelope.
+- **Números reais do fechamento:** **240 testes** (237 na revisão + 3 novos:
+  gate `cells` inválida, atomicidade do `bulk_insert`, SRS divergente); grade
+  4674/0.005 = **118 células**; grade 5880/500 m = **144 células**.
+- `area_settings.srs_id` (nome real) corrigido em PLAN/STATUS; nota de backfill
+  da `0007` (srid→4674, intencional) e do privilégio de FK
+  (`GRANT REFERENCES ON spatial_ref_sys`) registradas.
+- **Borda do recorte:** o motor usa `[x_min, x_max) × [y_min, y_max)`;
+  `ST_Contains`/`ST_Covers` **não** são equivalentes na fronteira.
+- **Adiado para o hardening da Fase 6:** dedup dos helpers de teste (n7), n8 e
+  n13 — registrados, não corrigidos agora (YAGNI/escopo).
+
+**Nada commitado** — o usuário faz commits manualmente. Arquivos em jogo neste
+fechamento (todos na árvore de trabalho): `crates/ta-db/migrations/0008_cell_validity.sql`
+(novo), `crates/ta-db/src/{repo_cell,error}.rs`, `crates/ta-core/src/cell.rs`,
+`crates/ta-cli/src/{flow,seed,main}.rs`, testes de `ta-db`/`ta-cli`,
+`crates/ta-gui/src/{db_worker,app}.rs`, `README.md`, `INSTALL.md`, PLAN/STATUS.
+
+### Não commitado (registro do re-planejamento)
+
+> Seção histórica, referente à criação do PLAN (re-planejamento domain-first),
+> **não** ao fechamento da Fase 1 acima.
+
+Novo: `.pantheon/deepwork/terraamazon-cleanroom-rust/PLAN-terraamazon-parity.md`.
+Modificado: este `STATUS.md` (linha de ponte no cabeçalho + esta seção final).
+Nenhum arquivo de código tocado.
+
+### Fechamento da revisão da Fase 2 (2026-10-18)
+
+Themis revisou a Fase 2 (classes/rulesets/regras na árvore de trabalho,
+não commitada); os achados foram aplicados por Hermes — **nada commitado**.
+
+- **F1 — cascata silenciosa:** migração **nova** `0011_rule_class_restrict`
+  (idempotente) recria `rules.class_id → classes(id)` com
+  **`ON DELETE RESTRICT`**. O repositório traduz a violação em
+  `Error::ClassInUseByRules` (contagem + caminho de saída). `class delete`
+  mostra a contagem e **bloqueia** sem `--force`; com `--force`, regras +
+  classe caem numa **única transação** (`PgClassRepo::delete_with_rules`).
+  Consequência de numeração registrada: `0012_queue` (Fase 3),
+  `0013_drafts_measures` (Fase 3), `0014_scenes` (Fase 4).
+- **F2 — corrida de versão:** `PgRuleSetRepo::create` substitui
+  "MAX(version)+1 + retry único" por **`pg_advisory_xact_lock`**
+  (`hashtext(project_id || ':' || name)`) envolvendo SELECT MAX + INSERT na
+  mesma transação. Colisão residual vira `Error::VersionRace`
+  ("corrida de versão …; tente novamente") e `duplicate_error` **não** a
+  captura mais (não é "nome duplicado"). Prova: **6 processos CLI reais ×
+  mesma linhagem × 5 rodadas → 6 criados, versões {1..6} sem buraco**
+  (teste `cli_ruleset_seis_processos_paralelos_em_cinco_rodadas`, verde).
+- **F3 — `not` + medida ausente (política decidida):** ausência **avaliada**
+  propaga para a regra inteira, inclusive sob `not`/`or` — regra com
+  comparação de medida ausente **nunca casa** (célula sem observação não é
+  classificada por negação; ex.: `NOT NDVI >= 1` sem `ndvi` → "nenhuma
+  classe"). A ausência é de medidas **efetivamente avaliadas**: curto-circuito
+  de `and`/`or` pode ocultar medidas à direita (F7).
+- **F4 — predicado inválido com rastro:** `Decision.skipped_invalid` +
+  `skipped_invalid_names` (ordenado); `rule eval` imprime
+  "regras ignoradas (predicado inválido): N [nomes]".
+- **F6 — ciclos de `parent_id`:** escrita sobe a cadeia de mães (limite 100)
+  e rejeita ciclo/auto-pai com `Error::ClassParentCycle` acionável.
+- **F8 — escrita de `is_active`:** `class update --active <bool>` e
+  `rule update --ruleset <id> --name <n> [--active b] [--priority p]
+  [--when expr] [--class id]` com update **parcial real** no repo
+  (`RulePatch` + `COALESCE($n, coluna)` — campo ausente preserva o valor).
+  **Decisão documentada:** `classes.is_active` hoje é atributo de **exibição**
+  — o motor não consulta classes; desativar classe não altera decisão
+  (o motor NÃO foi mudado nesta rodada; `rules.is_active` sim é consultado).
+- **F9/F10 — parser:** EBNF atualizada (aceita `.5`, `5.`, `+.5` — já
+  aceitos pelo parser); literal não finito (`inf` por overflow) ou com mais
+  de **17 dígitos significativos** (limite de distinção do `f64`) é rejeitado
+  com `RuleError::NumberOutOfRange` ("número fora de intervalo").
+- **F11 — código morto:** `RuleError::UnexpectedChar` removida (nunca
+  construída); `Predicate::matches` removida (só testes a chamavam —
+  `evaluate` é a API de avaliação; `matches_collecting` cobre o resto).
+- **F12 — `resolve_project("")`:** nome vazio/só-espaços é rejeitado antes
+  de tocar no banco (não auto-cria projeto sem nome).
+- **F5 — REGISTRADO para a Fase 3 (não implementado):** integridade
+  multi-projeto via triggers `BEFORE INSERT/UPDATE` comparando `project_id`
+  em `rules.class_id ↔ rulesets.project_id`,
+  `classes.class_group_id/parent_id` — requisito da fila de processos
+  (`0012_queue`), ver PLAN-terraamazon-parity §Fase 3.
+
+**Verificação real (2026-10-18):** `cargo fmt --all -- --check` ✓ ·
+`cargo clippy --workspace --all-targets -- -D warnings` ✓ ·
+`cargo test --workspace` ✓ (unitária) · `TA_TEST_PG=1 TA_PG_DSN=… cargo
+test --workspace` ✓ (gated, PG16+PostGIS 3.4 real) · migração `0011` em
+banco limpo 2× (11/11, depois "nada pendente") e em banco já em `0010`
+(FK `confdeltype = 'r'` confirmada) · `class delete` bloqueia com contagem
+("usada por 2 regra(s)") e `--force` apaga atômico · `rule eval` com
+`NOT NDVI >= 1` sem `ndvi` → "nenhuma classe" · `rule eval` mostra
+"regras ignoradas (predicado inválido): 1 [quebrada]" · ciclo A→B→A e
+auto-pai rejeitados · `--when 'ndvi >= 999…9'` (32 dígitos) rejeitado ·
+`resolve_project("")` rejeitado (zero projetos sem nome no banco) ·
+`dev-up.sh` 2× idempotente.
+
+Testes existentes atualizados com a nova semântica (motivo: F3 — regra com
+medida ausente nunca casa; curto-circuito oculta medidas à direita): os
+casos de `or`/`not` do motor foram reescritos para a política nova e o caso
+que classificava `agua` por negação sem observação vira "nenhuma classe"
+(`regra_not_sem_medida_nao_decide_classe`). Nenhum teste de produção
+assumia a semântica antiga fora do motor.
+
+### Fechamento da revisão da Fase 3 (2026-10-18/19)
+
+Themis revisou a Fase 3 (fila de processos + classificação básica, na árvore
+de trabalho, não commitada); os achados foram aplicados por Hermes —
+**nada commitado**.
+
+- **M1 — saída para o operador em delete com `draft_cells`** (FKs
+  `ON DELETE RESTRICT` da `0013` ganharam caminho de saída; nada silencioso):
+  - **`draft delete --project <id> --name <n> [--yes]`** (novo): mostra
+    ANTES a contagem de células classificadas; sem `--yes` **bloqueia**
+    (rascunho é derivado, mas a remoção é destrutiva — intenção explícita);
+    com `--yes` apaga o rascunho e as decisões (CASCADE) reportando a
+    contagem. Repo: `PgDraftLayerRepo::{get, count_cells, delete}`.
+  - **`class delete`**: pré-checagem de `draft_cells` além das regras
+    (repo `count_drafts_for_class` — contagem por rascunho COM nome). Sem
+    `--force`: bloqueia com "classe `X` decide N célula(s) em M rascunho(s):
+    …; apague o(s) rascunho(s) com `draft delete` ou repita com --force".
+    Com `--force`: **uma transação** apaga draft_cells + regras + classe e
+    **reporta as três contagens** (repo `delete_force` →
+    `ClassForceDeleted`). O `delete` simples passou a **discriminar a FK**
+    pelo nome da constraint: violação de `draft_cells_class_id_fkey` vira
+    `Error::ClassInUseByDraftCells` (antes seria relatado como "usada por
+    regra(s)" mesmo sem regra).
+  - **`ruleset delete --project <id> --name <n> [--version v] [--force]`**
+    (novo): mesma pré-checagem (`count_drafts_for_ruleset`); sem `--force`
+    com decisões: bloqueia; com `--force`: draft_cells + regras + ruleset
+    numa transação com as três contagens (`RuleSetForceDeleted`); sem
+    decisões: apaga com contagem de regras em cascata. O `delete` do
+    ruleset também traduz a FK (`Error::RuleSetInUseByDraftCells`).
+- **m2 — `task cancel` de task concluída**: recusado com
+  "task `X` já concluída; nada a cancelar" quando
+  pendentes+running+error = 0 — `done` (histórico de sucesso) não vira
+  `cancelled`; task `failed` continua cancelável (cancelling impede retry).
+- **m3 — `DraftCell` morto**: tipo removido de `ta-core` (nunca usado em
+  assinatura — as linhas de rascunho gravam por tuplas em
+  `draft_upsert_on`; YAGNI).
+- **m5 — rascunho de outra grade**: `task create` (rascunho existente) e
+  `task run` (pré-voo, inclui rascunho APAGADO como erro próprio) validam
+  `task.cell_layer == draft_layer.cell_layer` — erro acionável
+  ("o rascunho `X` pertence à grade `Y`, mas a task usa a grade `Z`").
+- **Registros (não implementar agora)**: Fase 4 — `cell_measures` com
+  proveniência por cena (`scene_id` NULL FK→scenes; last-write-wins por
+  `(cell_layer, cell_id, measure)`; PK inalterada) e Fase 5 — extração do
+  executor para crate próprio (`ta-flow`) antes da GUI; risco transversal
+  novo no PLAN §11: **toda FK RESTRICT nova vem com pré-checagem +
+  mensagem acionável + caminho de saída** (padrão M1).
+
+**Números reais do fechamento:** **306 testes** (300 na revisão + 6 novos:
+5 CLI gated — `draft delete` sem/com `--yes`, `class delete` bloqueando com
+contagens/nomes e `--force` com 3 contagens, `ruleset delete` idem,
+`task cancel` de done recusado, rascunho de outra grade recusado no create
+e no run — e 1 repo gated: recusas tipadas + discriminação de FK +
+`delete_force` com as três contagens). Migrações **13/13**. `DraftCell`
+removido sem quebrar compilação (nenhum uso real).
+
+**Verificação real (2026-10-19):** `cargo fmt --all -- --check` ✓ ·
+`cargo clippy --workspace --all-targets -- -D warnings` ✓ ·
+`cargo test --workspace` ✓ (unitária) · `TA_TEST_PG=1 TA_PG_DSN=… cargo
+test --workspace` ✓ **306/306** (PG16+PostGIS 3.4 real) · ponta a ponta
+real pelos testes CLI: classe→regra→medidas→`task run`→`draft_cells`, e os
+seis fluxos de delete/cancel/grade listados acima provados contra o binário
+real · `dev-up.sh` 2× idempotente.
+
+**Nada commitado** — o usuário faz commits manualmente.
+
+## Fase 4 do fluxo — SCENES E EXCHANGE (@hermes, 2026-10-19)
+
+**Escopo entregue** (PLAN §6, Fase 4; migração `0014_scenes`; desenho
+aprovado no briefing — divergências listadas abaixo):
+
+- **Migração `0014_scenes`** (idempotente): `scenes` (global,
+  `UNIQUE(name)`, aquisição/footprint opcionais, `footprint
+  geometry(MultiPolygon,4674)`, `metadata jsonb`), `project_scenes`
+  (N:N com CASCADE duplo, `linked_on`), `cell_measures.scene_id` NULL
+  FK→`scenes` `ON DELETE SET NULL` + índice (proveniência; a PK
+  `(cell_layer_id, cell_id, measure)` e a política **last-write-wins**
+  ficam inalteradas, documentadas na migração), e
+  `projects.description` (hospeda a descrição da seção `project` do
+  exchange — ver divergência d1).
+- **Exchange `curupira-monitoring-exchange v1`** — modelo serde e dono do
+  formato em `ta-gis::exchange` (SEM dependência de banco, sem GDAL:
+  JSON puro + `wkt` 0.14 para geometria, já no lock via geozero).
+  Portabilidade por NOMES (projeto, fase, camada, `cell_id`, classe,
+  ruleset nome+versão, cena). `deny_unknown_fields` (typo não perde dado
+  silenciosamente), validação de `format`/`version` com erros tipados,
+  WKT com contexto na mensagem (`cell_layers[0].cells[2].wkt`).
+- **`exchange export --project <id|nome> --out <arquivo>`**: resolve
+  projeto EXISTENTE (sem auto-criar), coleta TODAS as seções por UUID e
+  escreve JSON pretty com contagens por seção na saída; seções vazias
+  são válidas (projeto recém-criado exporta).
+- **`exchange import --in <arquivo> --into <novo-nome>`**: RECUSA projeto
+  existente (sem merge nesta fase); recria as seções na ordem de
+  DEPENDÊNCIA — projeto(+settings) → **cenas(+vínculos)** → fases →
+  AOI(camada+features+vínculo) → grades(células bulk+bloqueios) → grupos
+  → classes (**ordem topológica por `parent_name`; ciclo é erro antes do
+  banco**) → rulesets versão explícita (+regras com `parse_predicate`
+  ANTES de gravar, erro aciona a regra) → rascunhos(+decisões) →
+  medidas(upsert). Uma transação por seção; célula de exchange entra em
+  WKT 4674 direto (sem `ST_Transform` — novo `import_cells_4674_on`).
+- **`scene add/list/link/unlink/remove`**: `remove` é destrutivo com
+  `--yes` (sem ele mostra projetos vinculados + medidas que perdem a
+  proveniência); cena global reaproveitada pelo import quando o nome já
+  existe (política documentada; `SceneDuplicate` tipado com caminho de
+  saída).
+- **`measure set --scene <nome>`**: proveniência resolvida por nome,
+  erro acionável ("não existe; crie com `scene add`"). Regrar sem
+  `--scene` SUBSTITUI a proveniência anterior (last-write-wins).
+- **ta-db**: `repo_scene` novo; variantes `_on(exec/conexão)` para o
+  import transacional (`phase/aoi/class/class_group/draft/rule/
+  ruleset-with-version/activate/block/scene create+link/feature-insert`);
+  `PgDraftLayerRepo::list_cells` (leitura de decisões para o export);
+  `PgProjectRepo::flow_settings`/`create_with_flow_settings`;
+  `upsert_measures_on`/`list_measures` com `scene_id`.
+
+**Divergências do desenho aprovado (todas mínimas e documentadas):**
+- **d1 — `projects.description`**: o schema não tinha descrição de
+  projeto; a coluna foi adicionada NA `0014` para hospedar o campo
+  `description` da seção `project` do formato aprovado (nenhum comando a
+  escreve; entra/sai pelo exchange — documentado na migração).
+- **d2 — `aoi_layer_name` opcional em `cell_layers`**: campo ADITIVO ao
+  formato; `cell_layers.aoi_layer_id` é NOT NULL no banco e a grade
+  precisa saber qual AOI recriar. Sem o campo: 1 AOI no projeto resolve
+  sozinha; 0 ou N AOIs → erro acionável pedindo o campo.
+- **d3 — cenas ANTES de medidas no import**: a lista do desenho terminava
+  em "…measures→scenes+links", mas a medida referencia a cena
+  (`scene_name`); a ordem de dependência exige cenas primeiro (a seção
+  `scenes` do DOCUMENTO continua no fim, como aprovado).
+- **d4 — import REAPROVEITA cena existente pelo nome** (cena é global,
+  `UNIQUE(name)`): criar duplicaria erro no round-trip export→import no
+  MESMO banco. Vínculo com o novo projeto é sempre gravado.
+- **d5 — múltiplos rulesets ativos no documento**: o índice parcial único
+  (máx. 1 ativo por projeto) é lei; o import ativa o PRIMEIRO ativo do
+  documento e reporta. (`rule eval` idem: ativo é o do projeto alvo.)
+- **d6 — export de cena referenciada só por medida**: entra na seção
+  `scenes` também (senão o import não resolveria `scene_name`); em
+  prática o projeto a tem vinculada.
+
+**Fora do escopo (intencional):** merge de import (recusado, documentado),
+GDAL no exchange (JSON puro), GUI, área (Fase 5), matriz de paridade
+(Fase 6). `ta-gui` não foi tocada.
+
+**Testes (+18; 324 no total):**
+- Unitários sem banco (9 em `ta-gis::exchange`): round-trip serde do doc
+  de exemplo, seções vazias válidas, `format`/`version` errados recusados,
+  seção desconhecida recusada (aponta linha), WKT inválido com contexto,
+  footprint exige (Multi)Polygon, ISO-8601 (RFC-3339 e data simples),
+  WKT do motor reparseia; 2 em `ta-core::scene` (defaults serde).
+- Gated (4 em `ta-db/tests/pg_fase4_scenes.rs`): `UNIQUE(name)` tipado,
+  footprint EWKB↔PostGIS como MultiPolygon 4674, vínculo idempotente com
+  CASCADE e `projects_using`/`measures_using`, medida sobrevive ao delete
+  da cena com SET NULL + last-write-wins da proveniência.
+- Gated E2E pelo binário (3 em `ta-cli/tests/flow_fase4_cli.rs`):
+  **round-trip completo** (projeto com fase, AOI, grade 2 células, 1
+  bloqueio, grupo+2 classes com mãe, ruleset v1 + 2 regras, `task run`
+  classificando, medidas com cena) → export → import → **contagens iguais
+  em 10 tabelas/views**, **igualdade geométrica `a.geom = b.geom` por
+  (nome da grade, cell_id)** (0 diferenças), cena reaproveitada com
+  aquisição/footprint idênticos (`ST_Equals`), decisões iguais POR NOME de
+  classe, medidas iguais, **mesma decisão `rule eval`** nos dois projetos
+  para a amostra `ndvi=0.72`; e as **6 recusas**: projeto existente, JSON
+  corrompido, versão 99, classe inexistente (aponta a regra), predicado
+  inválido (aponta a regra), projeto fantasma no export; ciclo de vida
+  `scene add/list/link/unlink/remove` com recusa sem `--yes`;
+  `measure set --scene` (erro acionável + saída com a cena).
+
+**Provas de migração (2026-10-19, conda PG16+PostGIS 3.4):** banco LIMPO →
+`migrate` aplica **14/14** e a 2ª execução reporta "nada pendente";
+banco JÁ EM 0013 (Migrator sem a 0014) → `migrate` incremental aplica
+**só a 0014** (14/14; `scenes`, `project_scenes` e
+`cell_measures.scene_id` confirmados no catálogo). `dev-up.sh` 2×
+idempotente (doctor exit 0, seed "já existia", 118 células). Round-trip
+adicional com o projeto `demo` do seed: 118 células exportadas/importadas
+com **0** diferenças em `a.geom = b.geom`.
+
+**Verificação real:** `cargo fmt --all -- --check` ✓ ·
+`cargo clippy --workspace --all-targets -- -D warnings` ✓ ·
+`cargo test --workspace` ✓ · `TA_TEST_PG=1 TA_PG_DSN=… cargo test
+--workspace` ✓ **28/28 binários, 324 testes** (gated executados de fato —
+zero "skipped").
+
+**Nada commitado** — o usuário faz commits manualmente.
+
+## Fechamento da Fase 4 — achados da revisão (Themis) aplicados (@hermes, 2026-10-19)
+
+A revisão da Fase 4 apontou 1 MAJOR, 2 MINOR e 2 NIT; todos aplicados SEM
+iniciar a Fase 5 (área/GUI/ta-flow) e SEM commit:
+
+- **MAJOR-1 — recuperabilidade de import falho:**
+  1. **Import ATÔMICO** — `exchange import` agora roda projeto + TODAS as
+     seções numa ÚNICA transação (`import_sections` sobre
+     `&mut PgConnection`; novas variantes executor: `PgProjectRepo::create_on`,
+     `PgSceneRepo::get_by_name_on`, `PgCellRepo::exists_on` — o que a seção
+     anterior gravou só é visível dentro da transação). Falha em qualquer
+     seção NÃO deixa NADA no banco (nem projeto parcial) e o mesmo `--into`
+     pode ser repetido imediatamente; a recusa de nome existente continua
+     (duplicata agora só quando o import ANTERIOR concluiu). A mensagem de
+     falha cita o caminho de saída exato:
+     `project delete --project <nome> --yes` (defesa em profundidade — com o
+     rollback nada deve restar).
+  2. **`project delete [--yes]`** — deleção ORDENADA em transação única
+     (`PgProjectRepo::delete_ordered` + `ProjectDeleteReport`), respeitando as
+     FK `ON DELETE RESTRICT` SEM desativar triggers: draft_cells → rules →
+     rulesets → cell_log → processes → tasks → cell_measures → blocked_cells →
+     cells → cell_layers → draft_layers → **aoi_layers → features → layers**
+     (aoi_layers ANTES de layers: `layer_id` é CASCADE e o relatório precisa
+     atribuir cada linha à tabela certa) → project_scenes → classes →
+     class_groups → phases → project. Relatório com contagens por tabela
+     (18 rótulos + `total=`). Sem `--yes`: recusa mostrando o resumo do que
+     seria apagado (`delete_preview`, mesmas contagens). Cenas são globais:
+     sai só o vínculo, `scenes` permanece. A deleção NÃO auto-cria projeto.
+  3. Prova real (projeto `demo` 118 células, import com falha injetada no
+     MEIO do doc — WKT inválido em `cell_layers[0].cells[7]`): falha →
+     `select count(*) from projects where name='demo_atomo2'` = **0** →
+     retry do MESMO `--into` **funciona** → `project delete --yes` reporta
+     `total=122` (cells=118, cell_layers=1, aoi_layers=1, features=1,
+     layers=1) e o banco fica zerado por id capturado.
+- **MINOR-1 — cena reaproveitada com divergência:** no import, cena existente
+  (nome é global) tem footprint (WKT normalizado pelo mesmo serializador) e
+  metadata comparados; divergência emite `aviso: cena \`X\` já existia com
+  footprint/metadata diferentes — reaproveitada sem alteração` no relatório.
+  Não falha, não sobrescreve (teste gated: footprint trocado no doc → aviso
+  presente + `ST_Equals` do conteúdo original + vínculo do projeto novo).
+- **MINOR-2 — float_roundtrip:** `serde_json = { version = "1", features =
+  ["float_roundtrip"] }` no workspace (afeta exchange inteiro). Teste
+  unitário: `9643762.620782405` no campo `value` de medida → export 2× com
+  bytes idênticos e f64 preservado no reparse.
+- **NIT-1:** mensagem de pai de classe agora diz "parent_name com ciclo ou
+  mãe inexistente entre …" (antes: "forma ciclo" — impreciso, o limite de
+  passos também dispara para mãe inexistente).
+- **NIT-2:** `scene add --footprint` distingue WKT inválido ("não é WKT
+  reconhecível e o arquivo não existe") de WKT válido não-poligonal
+  (`FootprintNotPolygonal` repaginado: "esperado POLYGON/MULTIPOLYGON,
+  recebido POINT") — POINT não caía em "não reconhecível". 3 testes
+  unitários em `flow_scene`.
+- **Risco permanente reafirmado (PLAN §10 risco 7):** FK RESTRICT ⇒
+  pré-checagem com contagens + caminho de saída explícito — agora também no
+  apagado de PROJETO inteiro (`project delete` é o caminho de saída do import
+  falho e de qualquer projeto rico com rules/draft_cells).
+
+**Testes:** +7 (331 no total, 28 binários): 1 unitário float_roundtrip
+(`ta-gis::exchange`), 3 unitários de footprint (`ta-cli::flow_scene`), 3
+gated E2E (`flow_fase4_cli.rs`): import falho não deixa projeto parcial e
+retry funciona (inclui asserção da mensagem com o comando exato de saída),
+cena divergente emite aviso e é reaproveitada sem sobrescrita,
+`project delete` sem/--yes com 18 tabelas zeradas POR ID capturado antes da
+deleção (join com projects zeraria trivialmente) e cena global sobrevivente.
+
+**Verificação real:** `cargo fmt --all -- --check` ✓ ·
+`cargo clippy --workspace --all-targets -- -D warnings` ✓ ·
+`cargo test --workspace` ✓ · `TA_TEST_PG=1 TA_PG_DSN=… cargo test
+--workspace` ✓ **28/28 binários, 331 testes** (gated executados — zero
+"skipped") · `dev-up.sh` 2× idempotente (doctor exit 0).
+
+**Nada commitado** — o usuário faz commits manualmente.
+
+## Fase 6a — hardening e métricas (CONCLUÍDA, 2026-10-19, @hermes/@nyx)
+
+Escopo desta rodada: fechar dívida de teste conhecida, medir cobertura/bench,
+endurecer CI e auditar (`deny`/`unwrap`/duplicatas). **A matriz de paridade e a
+documentação final são a 6b e NÃO foram escritas aqui.** Nada commitado.
+
+### 1. Dívida de teste do `reset_demo` — CORRIGIDA
+
+- **Causa raiz confirmada:** `DELETE FROM projects WHERE name='demo'` cru
+  falha com `rules.class_id ON DELETE RESTRICT` (0011) assim que o demo tem
+  ruleset/regra. O reset agora usa o caminho ORDENADO do produto
+  (`project delete --project demo --yes`) e tolera projeto ausente.
+- **Teste de regressão novo** (`dev_up_integration.rs`):
+  `reset_funciona_com_projeto_rico_em_rules_e_task` — cria classe → ruleset →
+  regra → task `classify` → `task run` (118 processos/células, status `done`,
+  log por célula > 0) → reset pelo caminho ordenado → projeto ausente →
+  `seed-demo` de novo → 2 camadas / 3 classes / 1 AOI / 1 grade / 118 células.
+  Esse é exatamente o estado que quebrava o DELETE cru.
+- **Corrida entre testes:** os dois testes que apagam/resemeiam `demo` rodam
+  em paralelo no mesmo banco. Um `tokio::sync::Mutex` estático
+  (`DEMO_LOCK`, feature `sync` do tokio no workspace) serializa os dois.
+  Sem isso, a primeira execução da cobertura falhou de forma reproduzível
+  (`projeto demo não existe mais`).
+- **Prova:** suíte gated executada **2×** — 369 testes em 35 alvos
+  (21 integração + 7 unit + 7 doc-tests), 0 ignored; os **3 testes de MVT
+  auto-pulam** neste host (sem protobuf-c) e a prova real é o job `linux-pg`
+  do CI. `reset_funciona...` ok nas duas.
+
+### 2. Cobertura — metas do §8 ATINGIDAS (medida real)
+
+Ferramentas instaladas com sucesso nesta máquina: `rustup component add
+llvm-tools-preview` e `cargo install cargo-llvm-cov --locked` (**0.9.1**,
+~1 min). Comando (Postgres real, não subestima os repos):
+
+```sh
+TA_TEST_PG=1 TA_PG_DSN=postgres://ta:ta@127.0.0.1:55432/ta \
+  cargo llvm-cov --workspace --json --output-path /tmp/opencode/cov.json
+```
+
+| escopo | cobertura de linhas | linhas |
+|---|---|---|
+| **global do workspace** | **73,48%** | 15 657 / 21 309 |
+| **`ta-engine`** | **98,53%** | 874 / 887 |
+| **`ta-db` inteiro** | **91,97%** | 2 441 / 2 654 |
+| **`ta-db` `repo_*.rs`** | **92,61%** | 2 104 / 2 272 |
+| `ta-core` | 96,77% | 600 / 620 |
+| `ta-gis` | 75,38% | 1 583 / 2 100 |
+| `ta-flow` | 73,14% | 749 / 1 024 |
+| `ta-cli` | 72,02% | 3 225 / 4 478 |
+| `ta-gui` | 64,79% | 6 185 / 9 546 |
+
+Por arquivo de repo (todos ≥85%): `repo_aoi` 100%, `repo_area` 100%,
+`repo_phase` 100%, `repo_class` 99,65%, `repo_task` 94,80%, `repo_scene`
+94,59%, `repo.rs` 90,89%, `repo_cell` 88,05%, `repo_ruleset` 85,11%.
+**Nenhuma invenção:** números do relatório JSON do `cargo-llvm-cov`; a
+ferramenta conta também linhas de módulos `#[cfg(test)]` (método padrão, sem
+exclusão) — o que, se algo, torna o número conservador para o código de
+produção.
+
+**CI:** novo passo `cobertura (não-gating, informativa)` no job `linux-pg`
+(service PostGIS), `continue-on-error: true`, instala a ferramenta só se
+ausente e, se indisponível, emite `::warning::`; artefato `coverage`
+(lcov + html) publicado com `if-no-files-found: ignore`. Não quebra o CI se
+a ferramenta faltar.
+
+### 3. Benchmarks — re-medidos (detalhe em `benches/BASELINE.md`)
+
+Banco **limpo por execução** (`ta_bench` recriado), mesmo host da baseline
+(Xeon Gold 5120, 52 vCPU, 472 GiB), commit `75d921d`, `ta-db` 3× — mediana
+das médias vs baseline de 2026-10-18:
+
+| cenário | mediana | Δ vs baseline |
+|---|---|---|
+| `bulk_insert/10k` | 511,5 ms | +2,1% (ruído) |
+| `bbox_query/janela_viewport` | 12,57 ms | +3,6% |
+| `list_with_ids/10k` | 28,21 ms | +8,2% |
+| `mvt_tile/z12` | **não medido** | PostGIS conda sem protobuf-c |
+
+`ta-gui` headless: 1,76 / 2,47 / 5,53 / 0,01 ms (mean) — melhor que a
+baseline de 2026-10-16 (−14,6% / −2,4% / −20,5% / 0%); p95 pior 5,91 ms,
+~5,6× abaixo do gatilho de 33 ms (Fase 3b continua não disparada).
+**Observação metodológica:** medir no banco de trabalho acumulado (491 499
+features de testes) inflava o `bbox_query` para 28 ms por causa do GIST
+global; em banco limpo volta a ~12,6 ms. Por isso o protocolo exige DB limpo.
+
+### 4. CI / release — revisados
+
+- `.github/workflows/ci.yml`: YAML válido (parseado com PyYAML); jobs
+  `linux` (fmt/clippy/test/deny), `linux-pg` (gated + bench + **cobertura
+  não-gating**) e `windows`; nenhum step de contagem de testes existia (nada
+  a ajustar). O bench continua `continue-on-error: true`.
+- `.github/workflows/release.yml`: confirma os **DOIS** binários em todas as
+  plataformas — Linux tar.gz copia `curupira-gis` **e** `ta-cli`; `.deb`
+  (`[package.metadata.deb]` assets) empacota ambos; Windows zip/instalador
+  copiam `curupira-gis.exe` + `ta-cli.exe`; macOS `bundle.sh` copia os dois.
+- **Migrações embutidas:** `sqlx::migrate!("./migrations")` (sem runtime
+  path). Verificado nesta máquina sem `DATABASE_URL` no ambiente: `ta-cli
+  migrate` aplica 14/14 e a 2ª execução diz "nada pendente".
+
+### 5. Auditorias
+
+- **`cargo deny check`:** `advisories ok, bans ok, licenses ok, sources ok`
+  (nenhum advisory novo a corrigir; ignores existentes de zbus/ttf-parser
+  seguem justificados).
+- **`unwrap`/`expect` em não-teste:** grep em `crates/*/src/**` fora de
+  `#[cfg(test)]` achou **7 ocorrências reais** — **todas corrigidas**:
+  5 `spawn(...).expect(...)` de threads da GUI (agora logam em `stderr` e
+  deixam o canal desconectar; em `db_worker` também marca `alive=false`),
+  1 `out.last().expect(...)` em `viewport` (agora `last().copied()`), 1
+  `ring.last().expect(...)` em `normalizer` (índice após o gate `len >= 4`).
+  Resultado re-grep: **0**. `unwrap_or` e testes não entram na conta.
+- **`cargo tree -d`** (duplicatas relevantes, SEM refactor): `geojson`
+  0.24.2 (via geozero 0.15) vs 1.0.0 (workspace); `sha2` 0.10.9 (workspace)
+  vs 0.11.1 (sqlx-postgres); `thiserror` 1.0.69 (winit/calloop antigos) vs
+  2.0.21 (workspace); `hashbrown` 0.15/0.16/0.17; `rustix` 0.38 (calloop
+  0.13) vs 1.1; `getrandom` 0.3/0.4; `bitflags` 1.3.2 (flatbuffers) vs
+  2.13.2. Todas transitivas de dependências; nenhuma ação nesta fase.
+
+### 6. Verificação real desta rodada
+
+| check | resultado |
+|---|---|
+| `cargo fmt --all -- --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace` | ✅ **369 testes / 35 alvos** (21 integração + 7 unit + 7 doc-tests) |
+| `TA_TEST_PG=1 … cargo test --workspace` **2×** | ✅ 369/369, 0 ignored; **3 testes de MVT auto-pulam** sem protobuf-c (prova real: job `linux-pg` do CI) nas duas |
+| `cargo bench -p ta-db` (3×, DB limpo) | ✅ (MVT pulado com aviso) |
+| `cargo bench -p ta-gui` (headless) | ✅ |
+| `bash scripts/dev-up.sh` **2×** | ✅ exit 0, doctor ok, seed idempotente |
+| `cargo deny check` | ✅ |
+| cobertura global / engine / repos | ✅ 73,48% / 98,53% / 92,61% |
+
+### Pendências honestas (não fechadas aqui)
+
+- **6b:** matriz de paridade comportamental e documentação final.
+- Dedup de helpers de teste **n7/n8/n13** — ainda abertos (fora do escopo
+  desta rodada; a corrida do `demo` foi resolvida por lock, não por dedup).
+- **MVT** continua sem número real neste host (PostGIS conda sem protobuf-c);
+  depende do job `linux-pg` do CI.
+- **GPU** do render não é medida (headless mede tesselação CPU) — limitação
+  já documentada em `benches/map_render.md`.
+
+## Fase 6b — matriz de paridade e documentação final (CONCLUÍDA, 2026-10-19)
+
+Escopo: (1) matriz de paridade comportamental, (2) documentação final do fluxo,
+(3) auditoria das afirmações. **Nada commitado** — o usuário faz commits
+manualmente.
+
+### Entregues
+
+| Arquivo | Conteúdo |
+|---|---|
+| `docs/PARITY.md` | Matriz para o revisor: 10 itens IN (§3.1) com estado, comando reproduzível, teste, arquivos e limitações; tabela OUT (§3.2); fora por barreira (§3.3); “O que NÃO podemos afirmar”; “Como reproduzir”; registro de verificação. |
+| `.pantheon/deepwork/terraamazon-cleanroom-rust/PARITY-MATRIX.md` | Versão de trabalho: mesma matriz + transcritos crus da execução + índice teste→arquivo + lacunas/defeitos. |
+| `README.md` | Visão geral, arquitetura (7 crates + diagrama ASCII), quickstart, fluxo CLI completo, GUI, decisões 2/3/4-retificada/5, qualidade, limitações, clean-room. |
+| `INSTALL.md` | Pré-requisitos, `dev-up.sh`, `test-pg.sh`, migrações, `GRANT REFERENCES ON spatial_ref_sys`, display da GUI, troubleshooting (55432/doctor/senha mascarada), build release sem `DATABASE_URL`. |
+| `STATUS.md` | Este fechamento + tabela de fases atualizada. |
+
+### Resultado da matriz (§3.1)
+
+- **9 itens ✅ verificados**: projeto/fase; AOI; células e bloqueadas; classes
+  e grupos; regras/rulesets; fila com log por célula; classificação básica;
+  área; import/export.
+- **1 item ⚠️ parcial**: **visualização** — contrato headless verificado
+  (overlay/pick/legenda/viewport), **sem inspeção humana por display** (o host
+  não tem `DISPLAY`; o binário encerra com `WinitEventLoop … DISPLAY`).
+- **Nenhum item ❌.**
+
+### Execução real usada como evidência (projeto `parity_flow_demo`)
+
+Fluxo executado do zero e apagado ao final: import AOI (1 feição) → fase →
+AOI → grade 0,005° (**118 células**) → classes/grupos (3/1) → ruleset v1 +
+2 regras → medidas (8) → classificação (**117 processos**, 117 logs, 3
+decisões, 0 erros) → área **3627,54 ha** (bloqueada 30,74; disponível
+3596,80; desmatamento 1 célula/30,74; floresta 2/61,48) → exchange export
+(**35 155 bytes**, contagens completas) → import em projeto novo com **área
+idêntica** → `project delete --yes`.
+
+### Verificação executada (host Linux, 2026-10-19)
+
+| check | resultado |
+|---|---|
+| `cargo fmt --all -- --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace` | ✅ **369 testes / 35 alvos** (21 integração + 7 unit + 7 doc-tests) |
+| `TA_TEST_PG=1 TA_PG_DSN=… cargo test --workspace` | ✅ 369/369, 0 ignored; **3 testes de MVT auto-pulam** sem protobuf-c (prova real: job `linux-pg` do CI) |
+| `bash scripts/dev-up.sh` **2×** | ✅ exit 0, doctor 5 ok/1 aviso (MVT), seed idempotente |
+| `cargo deny check` | ✅ advisories/bans/licenses/sources ok (2 warnings de licença não usada: `CC0-1.0`, `Unicode-DFS-2016`) |
+| `cargo build --release -p ta-gui -p ta-cli` **sem `DATABASE_URL`** | ✅ 36 s; ambos os binários gerados |
+| `ta-cli doctor` | ✅ exit 0 |
+| `ta-cli migrate --dry-run` | ✅ 0 pendentes |
+| fluxo CLI completo | ✅ (números acima) |
+
+### Números de qualidade (Fase 6a, mantidos)
+
+369 testes; cobertura global **73,48%** (15 657/21 309), `ta-engine`
+**98,53%** (874/887), `ta-db` **91,97%** (2 441/2 654), `repo_*.rs`
+**92,61%** (2 104/2 272); bench `bulk_insert/10k` **511,5 ms**,
+`bbox_query` **12,57 ms**, `list_with_ids` **28,21 ms**; **MVT não medido**
+(PostGIS conda sem protobuf-c).
+
+### Dívidas remanescentes (explícitas)
+
+1. **MVT sem número real** neste host — depende do job `linux-pg` do CI
+   (imagem com protobuf-c). Nenhum número inventado.
+2. **Dedup de helpers de teste n7/n8/n13** — ainda aberto (a corrida do
+   `demo` foi resolvida por `DEMO_LOCK`, não por dedup).
+3. **Verificação visual humana** — não feita (sem display). A visualização
+   está verificada por contrato headless, e a matriz a marca ⚠️.
+4. **Escala 1M de células** — dois limites: teto do motor `MAX_CELLS =
+   5 000 000` (`ta-engine/src/grid.rs:64`) e teto de negócio default
+   `projects.max_cells = 1 000 000`; nenhum é capacidade medida; bench cobre
+   10 000 feições.
+5. **`project delete` — atribuição de `draft_layers` (corrigido na Fase 6):**
+   o relatório contava 0 e o total ficava 1 abaixo do preview porque
+   `cell_layers` era apagada antes e `draft_layers.cell_layer_id` é
+   `ON DELETE CASCADE`. A ordem passou a apagar `draft_layers` antes de
+   `cell_layers`; regressão em
+   `flow_fase4_cli::project_delete_ordena_e_zera_banco` (preview == total,
+   `draft_layers=1`).
+6. **Cobertura `ta-gui` 64,79% / `ta-cli` 72,02%** — abaixo de 85%, mas a meta
+   de 85% do §8 é para `ta-engine`/`repo_*.rs`; a global (70%) é atingida.
+7. **Regras sem predicado geoespacial/temporal** — o motor avalia medidas
+   numéricas; documentado como limitação de escopo.
+
+### Clean-room
+
+`docs/PARITY.md`, `README.md` e `INSTALL.md` foram revisados por grep: não
+citam binário/instalador, offsets, `hex dumps`, assembly, pseudocódigo,
+símbolos internos nem o hash do pacote legado. As referências ao produto de
+referência são comportamentais e genéricas; a matriz usa o plano aprovado e
+evidência do nosso sistema.

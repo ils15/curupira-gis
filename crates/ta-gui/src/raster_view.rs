@@ -154,15 +154,19 @@ pub struct BandLoadJob {
 pub fn spawn_band_load(path: PathBuf, band: usize) -> BandLoadJob {
     let (tx, rx) = std::sync::mpsc::channel::<BandMsg>();
     let job_path = path.clone();
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("ta-band".into())
         .spawn(move || {
             let result = load_band(&path, band);
             // Receptor pode ter caído (job substituído): falha de send é
             // o cancelamento — ignorada por design.
             let _ = tx.send(BandMsg::Done { path, band, result });
-        })
-        .expect("spawn da thread de banda (recursos de thread do SO)");
+        });
+    if let Err(err) = spawned {
+        // Sem thread, `tx` cai com a closure e `rx` desconecta (a UI mostra
+        // banda indisponível). Falha de SO não derruba o processo.
+        eprintln!("ta-gui: falha ao iniciar a thread de banda: {err}");
+    }
     BandLoadJob {
         rx,
         path: job_path,

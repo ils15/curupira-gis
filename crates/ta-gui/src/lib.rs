@@ -18,6 +18,9 @@
 //!   seleção, undo/redo de atributos);
 //! - [`panels`]/[`app`]: dock de camadas, tabela atributiva, inspetor,
 //!   status bar, diálogos e atalhos de teclado.
+//! - [`monitoring`]: janela de monitoramento (AOI/células/classes), task de
+//!   classificação via `ta-flow`, área consolidada e exchange — a GUI
+//!   orquestra, sem regra de domínio própria.
 
 pub mod app;
 pub mod app_state;
@@ -32,6 +35,7 @@ pub mod i18n;
 pub mod import_job;
 pub mod map_view;
 pub mod menus;
+pub mod monitoring;
 pub mod overlays;
 pub mod palette;
 pub mod panels;
