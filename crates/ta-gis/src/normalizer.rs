@@ -124,7 +124,8 @@ fn check_ring(ring: &LineString<f64>) -> std::result::Result<(), String> {
         ));
     }
     let first = ring.0[0];
-    let last = *ring.0.last().expect("len >= 4 garantido acima");
+    // `len >= 4` foi verificado acima; sem `expect` no caminho da lib.
+    let last = ring.0[ring.0.len() - 1];
     if first != last {
         return Err(format!(
             "anel de polígono aberto: início ({}, {}) ≠ fim ({}, {}); \

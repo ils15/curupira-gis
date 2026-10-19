@@ -26,7 +26,7 @@ pub struct ExportJob {
 /// Sobe a thread de export (GeoJSON).
 pub fn spawn_export(features: Vec<Feature>, path: PathBuf) -> ExportJob {
     let (tx, rx) = channel();
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("ta-export".into())
         .spawn(move || {
             match write_vector(
@@ -42,8 +42,12 @@ pub fn spawn_export(features: Vec<Feature>, path: PathBuf) -> ExportJob {
                     let _ = tx.send(ExportMsg::Failed(e.to_string()));
                 }
             }
-        })
-        .expect("spawn da thread de export (recursos de thread do SO)");
+        });
+    if let Err(err) = spawned {
+        // Sem thread, `tx` cai com a closure e `rx` desconecta (export sem
+        // resposta). Falha de SO não derruba o processo.
+        eprintln!("ta-gui: falha ao iniciar a thread de export: {err}");
+    }
     ExportJob { rx }
 }
 

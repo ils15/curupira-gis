@@ -186,7 +186,7 @@ impl PgProjectRepo {
         fill_delete_counts(&mut tx, id, &mut report).await?;
         // Ordem das deleções (dependências primeiro):
         // decisões → regras → rulesets → log/processos/tasks → medidas →
-        // bloqueios → células → grades → rascunhos → features/camadas → AOI →
+        // bloqueios → rascunhos → células → grades → features/camadas → AOI →
         // vínculos de cena → classes → grupos → fases → projeto.
         report.draft_cells = sqlx::query(
             "DELETE FROM draft_cells dc USING draft_layers dl \
@@ -254,12 +254,16 @@ impl PgProjectRepo {
         .execute(&mut *tx)
         .await?
         .rows_affected();
-        report.cell_layers = sqlx::query("DELETE FROM cell_layers WHERE project_id = $1::uuid")
+        // draft_layers ANTES de cell_layers: `draft_layers.cell_layer_id` é
+        // CASCADE — se a grade sair primeiro, o rascunho é apagado junto e o
+        // DELETE explícito abaixo contaria 0 (o relatório do delete ficaria 1
+        // abaixo do preview).
+        report.draft_layers = sqlx::query("DELETE FROM draft_layers WHERE project_id = $1::uuid")
             .bind(id)
             .execute(&mut *tx)
             .await?
             .rows_affected();
-        report.draft_layers = sqlx::query("DELETE FROM draft_layers WHERE project_id = $1::uuid")
+        report.cell_layers = sqlx::query("DELETE FROM cell_layers WHERE project_id = $1::uuid")
             .bind(id)
             .execute(&mut *tx)
             .await?

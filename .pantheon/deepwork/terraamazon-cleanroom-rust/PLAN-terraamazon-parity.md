@@ -308,9 +308,46 @@ semiaberta (`>=` no mínimo, `<` no máximo), nunca essas funções.
   sobrevive), aviso de cena reaproveitada com footprint/metadata
   divergentes, `float_roundtrip` no serde_json, mensagens de ciclo de
   classe e de footprint não-poligonal repaginadas. **Aguarda commit**.
-- Fases **5 e 6**: **não iniciadas**.
+- **Fase 5 (5a + 5b): concluída e commitada** (`318e7fe` / `75d921d`) —
+  `ta-flow` extraído (CLI e GUI usam o mesmo executor), área consolidada e
+  fluxo completo pela GUI (painel de monitoramento/canvas). 368 testes na
+  ocasião.
+- **Fase 6a (hardening/métricas): CONCLUÍDA** (2026-10-19, árvore de
+  trabalho, sem commit). Fechado:
+  - dívida de teste do `reset_demo` **corrigida** (reset pelo caminho
+    ordenado `project delete --yes`, com teste de regressão para projeto
+    demo COM ruleset+regra+task executada; suíte gated 2× estável);
+  - cobertura medida com Postgres real: **73,48% global** (15 657/21 309),
+    **98,53%** em `ta-engine` (874/887) e **92,61%** nos `repo_*.rs` de
+    `ta-db` (2 104/2 272; `ta-db` inteiro 91,97%) — metas do §8 atingidas
+    com o método registrado no STATUS;
+  - `unwrap`/`expect` em código não-teste: **0** (7 ocorrências reais
+    corrigidas; `unwrap_or`/testes não contam);
+  - `cargo deny check`: advisories/bans/licenses/sources **ok** (2 warnings
+    de licença não usada: `CC0-1.0`, `Unicode-DFS-2016`, ambos transitivos);
+  - CI ganhou cobertura **não-gating** com artefato (lcov/html), condicionada
+    à ferramenta; release confirma os DOIS binários e migrações embutidas
+    sem `DATABASE_URL`;
+  - benchmarks re-medidos em banco limpo e registrados em
+    `benches/BASELINE.md` (sem regressão conclusiva; MVT continua não
+    medido neste host por falta de protobuf-c).
+- **Fase 6b (matriz de paridade + documentação final): CONCLUÍDA**
+  (2026-10-19, árvore de trabalho, sem commit) — `docs/PARITY.md` revisado
+  (10 itens IN com evidência, OUT/barreira separados), `README.md`,
+  `STATUS.md`, `PARITY-MATRIX.md` e `benches/BASELINE.md` atualizados com
+  **369 testes** em 35 alvos (21 integração + 7 unit + 7 doc-tests), 3 testes
+  de MVT auto-pulados neste host, cobertura 73,48%/98,53%/92,61% e os números
+  de bench do §Fase 6a. Achados do gate do Themis aplicados: comando do
+  round-trip `ta-gis` com `--features gdal,geojson,csv` (9/9; sem features o
+  binário compilava 0 testes), `MAX_CELLS` separado em teto do motor
+  (5 000 000) vs. teto de negócio default (1 000 000), contagem de
+  `draft_layers` no `project delete` corrigida (ordem + regressão), fixture
+  `testdata/monitoring/medidas.csv`, e formulação honesta sobre MVT
+  auto-pulado (3 testes) em vez de "0 skipped".
 - Dívidas de teste adiadas para o hardening da Fase 6: dedup de helpers de
-  teste (n7), n8 e n13.
+  teste (n7), n8 e n13 — **ainda abertas** (não tocadas nesta rodada; a
+  corrida entre testes do `demo` foi resolvida com um mutex de teste, não é
+  o dedup).
 - Nada foi commitado por este registro (o usuário faz commits manualmente).
 - Nenhum ADR foi criado (não solicitado).
 

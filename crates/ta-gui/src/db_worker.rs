@@ -377,13 +377,18 @@ impl DbWorker {
         let (evt_tx, evt_rx) = std::sync::mpsc::channel::<DbEvt>();
         let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let alive_thread = std::sync::Arc::clone(&alive);
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("ta-db-worker".into())
             .spawn(move || {
                 run_worker(cmd_rx, evt_tx);
                 alive_thread.store(false, std::sync::atomic::Ordering::Relaxed);
-            })
-            .expect("spawn da thread de banco (recursos de thread do SO)");
+            });
+        if let Err(err) = spawned {
+            // Sem worker, os canais desconectam; marca `alive = false` para
+            // a UI não esperar comandos que ninguém vai processar.
+            alive.store(false, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("ta-gui: falha ao iniciar a thread de banco: {err}");
+        }
         Self {
             tx: cmd_tx,
             rx: evt_rx,

@@ -1077,6 +1077,24 @@ async fn project_delete_ordena_e_zera_banco() {
         .expect("projeto após preview");
     assert_eq!(ainda, 1, "preview não pode apagar nada");
 
+    // O preview conta o rascunho e o total que o delete com --yes precisa
+    // reproduzir linhas-por-tabela (regressão de off-by-one do CASCADE de
+    // `draft_layers.cell_layer_id`).
+    let n_after = |texto: &str, chave: &str| -> u64 {
+        texto
+            .split(chave)
+            .nth(1)
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("saída sem `{chave}`: {texto}"))
+    };
+    assert_eq!(
+        n_after(&combined, "draft_layers="),
+        1,
+        "preview deve contar o rascunho: {combined}"
+    );
+    let total_preview = n_after(&combined, "remove ");
+
     // -- com --yes: apaga TUDO com relatório --------------------------------
     let out = run_ok(
         &[
@@ -1091,6 +1109,12 @@ async fn project_delete_ordena_e_zera_banco() {
         "project delete --yes",
     );
     assert!(out.contains("projeto apagado"), "{out}");
+    assert!(out.contains("draft_layers=1"), "relatório: {out}");
+    assert_eq!(
+        n_after(&out, "total="),
+        total_preview,
+        "preview ({total_preview}) != total do delete: {out}"
+    );
     assert!(out.contains("draft_cells=2"), "relatório: {out}");
     assert!(out.contains("rules=2"), "relatório: {out}");
     assert!(out.contains("rulesets=1"), "relatório: {out}");

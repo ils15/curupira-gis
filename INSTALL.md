@@ -1,245 +1,177 @@
-# INSTALL — Curupira GIS
+# INSTALL — Curupira GIS (a partir do código-fonte)
 
-Instalação por sistema operacional. Binários de release ficam em
-<https://github.com/ils15/curupira-gis/releases> (builds `v*` são publicados
-como **draft**; um mantenedor marca "Publish" após revisão — ver
-`SHA256SUMS` para conferir integridade).
+Este documento cobre **desenvolvimento e execução local**. Para os binários de
+release (Windows/macOS/Linux), use a página de
+[Releases](https://github.com/ils15/curupira-gis/releases) — builds `v*` são
+publicados como **draft** até revisão humana; confira o `SHA256SUMS`.
 
-Componentes de uma release:
+## 1. Pré-requisitos
 
-| Arquivo | Conteúdo |
+| Componente | Versão/observação |
 |---|---|
-| `curupira-gis-v*-x86_64-unknown-linux-gnu.tar.gz` | `curupira-gis` + `ta-cli` (Linux; GDAL do sistema) |
-| `curupira-gis_x64.deb` | pacote .deb (Linux; os dois binários em `/usr/bin`; GDAL do sistema via `depends` resolvido pelo dpkg) |
-| `curupira-gis-v*-x86_64-pc-windows-msvc.zip` | `curupira-gis.exe` + `ta-cli.exe` + DLLs GDAL/PROJ embutidas + `share\` |
-| `CurupiraGIS-Setup-x64.exe` | instalador Windows (Inno Setup; mesmos binários/DLLs/dados do zip + atalhos e desinstalador) |
-| `CurupiraGIS-macos-arm64.zip` | `CurupiraGIS.app` (Apple Silicon; GDAL via Homebrew embutida no bundle; **não assinado**) |
-| `SHA256SUMS` | checksums sha256 de todos os artefatos |
-| `*.cdx.json` | SBOM CycloneDX por crate do workspace |
+| **Rust** | stable, conforme `rust-toolchain.toml` (instale via <https://rustup.rs>). `cargo`, `rustfmt` e `clippy` são usados na verificação. |
+| **GDAL** | 3.8 no host, link **dinâmico**: `sudo apt install libgdal-dev` (Debian/Ubuntu) ou `brew install gdal` (macOS). O `ta-cli doctor` confere e aponta o que falta. |
+| **PostgreSQL** | **16** com **PostGIS 3.4**. Duas formas de obter: **docker** *ou* **conda** (fallback). |
+| **Display** | Necessário apenas para a **GUI** (`DISPLAY` ou `WAYLAND_DISPLAY`). CLI e testes rodam headless. |
 
----
+Não é preciso `DATABASE_URL` para **compilar**: as migrações são embutidas no
+binário (`sqlx::migrate!`), não resolvidas em tempo de build. A conexão é
+resolvida em runtime (`--dsn` > `TA_PG_DSN` > `TA_DATABASE_URL` na GUI >
+default `postgres://ta:ta@localhost:5432/ta`).
 
-## Windows 10/11 (x64)
-
-### 1. Curupira GIS — instalador (recomendado)
-
-1. Baixe `CurupiraGIS-Setup-x64.exe` da release.
-2. Confira o hash: `Get-FileHash <arquivo>.exe -Algorithm SHA256` e compare
-   com `SHA256SUMS`.
-3. Execute o instalador (pt-BR ou en). Ele instala em `C:\Program Files\
-   Curupira GIS` (ou `%LOCALAPPDATA%\Programs\…` no modo "só p/ mim"), com
-   atalhos no menu iniciar (e na área de trabalho, opcional), página de
-   licença (MIT) e desinstalador no Painel de Controle.
-4. GDAL/PROJ e os dados (`share\gdal`, `share\proj`) vão **dentro** da pasta
-   de instalação — o app aponta para eles automaticamente; não instale GDAL.
-5. Rode `Curupira GIS` pelo atalho (ou `curupira-gis.exe` direto).
-
-> O `ta-cli.exe` fica na mesma pasta — adicione-a ao `PATH` manualmente se
-> quiser chamá-lo de qualquer terminal.
-
-### 1b. Curupira GIS — zip portátil (alternativa, sem instalador)
-
-1. Baixe `curupira-gis-v*-x86_64-pc-windows-msvc.zip` da release.
-2. Confira o hash: `Get-FileHash <arquivo>.zip -Algorithm SHA256` e compare
-   com `SHA256SUMS`.
-3. Extraia em uma pasta sem espaços se possível (ex.: `C:\Curupira`).
-   O zip já contém **GDAL + PROJ com dados** (`share\gdal`, `share\proj`) —
-   o app aponta para eles automaticamente ao iniciar; não instale GDAL.
-4. Rode `curupira-gis.exe`.
-
-### 2. PostgreSQL 16 + PostGIS 3.4
-
-1. Instale **PostgreSQL 16** pelo instalador EDB:
-   <https://www.enterprisedb.com/downloads/postgres-postgresql-downloads>
-2. Ao final da instalação, deixe o **StackBuilder** abrir e marque
-   **PostGIS 3.4 for PostgreSQL 16** (componentes espaciais + GDAL própria
-   do PostGIS — não conflita com a embutida do Curupira).
-3. Crie o banco do app (psql ou pgAdmin):
-
-   ```sql
-   CREATE DATABASE curupira;
-   ```
-
-   O schema é criado automaticamente pelo app/CLI na primeira conexão.
-
-### 3. Conexão
-
-- **Diálogo do app**: menu *Ajuda → Conectar banco…* — preencha host, porta,
-  usuário, senha e banco, ou cole a URL direta.
-- **Variável de ambiente** (pré-preenche o diálogo):
-
-  ```powershell
-  [Environment]::SetEnvironmentVariable(
-    "TA_DATABASE_URL", "postgres://postgres:SUA_SENHA@localhost:5432/curupira", "User")
-  ```
-
-- Para o `ta-cli` use `TA_PG_DSN` (mesma URL) ou `--dsn`.
-
----
-
-## Linux (x86_64; Debian/Ubuntu como referência)
-
-### 1. Dependências de sistema
+## 2. Provisionamento em um comando
 
 ```sh
-sudo apt install -y libgdal-dev gdal-bin   # GDAL 3.8+ (link dinâmico)
+bash scripts/dev-up.sh
 ```
 
-### 2. Curupira GIS
+O script:
 
-- **Pacote .deb** (Ubuntu/Debian, recomendado): baixe `curupira-gis_x64.deb`
-  da release e instale — os binários vão para `/usr/bin` e a documentação
-  para `/usr/share/doc/curupira-gis/`:
+1. escolhe o banco — se `TA_PG_DSN` existir usa; senão, se a porta 5432
+   escutar usa; senão tenta **docker** (`docker compose up -d postgis`); senão
+   cai no **conda** (`scripts/test-pg.sh --no-tests`, porta **55432**);
+2. compila o `ta-cli`;
+3. `doctor` (informativo) → `migrate` (schema idempotente) → `doctor`
+   (**reprova** o script se algo falhar) → `seed-demo`;
+4. imprime a GUI e o DSN (com a senha **mascarada**: `postgres://ta:***@…`).
 
-  ```sh
-  sudo apt install ./curupira-gis_x64.deb
-  # (instala libgdalXX do repositório automaticamente — dependência declarada)
-  ```
+É idempotente: rodar 2× não sobe banco duplicado nem duplica o demo.
 
-- **Release tarball**: baixe
-  `curupira-gis-v*-x86_64-unknown-linux-gnu.tar.gz`, verifique
-  `sha256sum -c SHA256SUMS --ignore-missing`, extraia e coloque os binários
-  no `PATH`:
-
-  ```sh
-  tar xzf curupira-gis-v*.tar.gz
-  sudo install -m755 curupira-gis ta-cli /usr/local/bin/
-  ```
-
-- **Do fonte** (qualquer Linux):
-
-  ```sh
-  sudo apt install -y build-essential pkg-config
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh  # rustup
-  cargo build --release --workspace
-  # binários: target/release/curupira-gis e target/release/ta-cli
-  ```
-
-### 3. PostgreSQL 16 + PostGIS 3.4 (docker compose, recomendado)
+### 2b. GUI
 
 ```sh
-cp .env.example .env      # ajuste usuário/senha se quiser
-docker compose up -d postgis
-# conexão: postgres://ta:ta@localhost:5432/ta
+bash scripts/dev-up.sh --gui
+# ou, com o banco já no ar:
+TA_DATABASE_URL='postgres://ta:ta@127.0.0.1:55432/ta' cargo run -p ta-gui
 ```
 
-Alternativa nativa: `sudo apt install -y postgresql-16 postgis postgresql-16-postgis-3`
-(ou os pacotes do [PGDG](https://www.postgresql.org/download/linux/) /
-[PostGIS](https://postgis.net/documentation/getting_started/)), depois
-`CREATE DATABASE curupira;` e `CREATE EXTENSION postgis;` (o app tenta criar
-a extensão se o usuário tiver permissão).
+A GUI **exige display**. Sem `DISPLAY`/`WAYLAND_DISPLAY` o binário encerra com:
 
-### 4. Conexão
+```
+WinitEventLoop(Os(... "neither WAYLAND_DISPLAY nor WAYLAND_SOCKET nor DISPLAY is set."))
+```
 
-- Diálogo do app (*Conectar banco…*), ou
-- `export TA_DATABASE_URL="postgres://ta:ta@localhost:5432/ta"` (GUI), /
-  `TA_PG_DSN` (CLI).
+Em servidor/CI, use os testes headless (`cargo test -p ta-gui`) em vez de abrir
+a janela.
 
----
+### 2c. Manual (sem o script)
 
-## macOS (Apple Silicon / arm64)
+Com docker:
 
-> Alpha: bundle **não assinado e não notarizado** — o Gatekeeper bloqueia na
-> primeira abertura. Use **botão direito no CurupiraGIS.app → Abrir →
-> Abrir** (uma vez só; depois o app abre normal).
+```sh
+cp .env.example .env          # opcional: TA_PG_USER / TA_PG_PASSWORD
+docker compose up -d postgis  # postgis/postgis:16-3.4 na porta 5432, banco `ta`
+export TA_PG_DSN='postgres://ta:ta@localhost:5432/ta'
+```
 
-1. Baixe `CurupiraGIS-macos-arm64.zip` da release e confira o hash:
-   `shasum -a 256 <arquivo>.zip` — compare com `SHA256SUMS`.
-2. Extraia (duplo clique no zip) e arraste `CurupiraGIS.app` para
-   `/Applications` (ou rode de onde estiver).
-3. Botão direito → **Abrir** na primeira vez (nota do Gatekeeper acima).
-   A GDAL/PROJ embutida no bundle (Frameworks + dados no Resources do app
-   via Homebrew) dispensa instalar GDAL.
-4. Para o `ta-cli` via terminal:
-   `/Applications/CurupiraGIS.app/Contents/MacOS/ta-cli`.
-5. Banco: PostgreSQL 16 + PostGIS 3.4 (ex.: `brew install postgresql@16` +
-   PostGIS, ou docker compose do repo).
+Sem docker (host com sudo bloqueado), cluster efêmero via conda-forge:
 
----
+```sh
+bash scripts/test-pg.sh --no-tests   # imprime o DSN e o comando de parada
+export TA_PG_DSN='postgres://ta:ta@127.0.0.1:55432/ta'
+```
 
-## Privilégios do PostGIS (FK de `spatial_ref_sys`)
+Depois, em qualquer um dos casos:
 
-A migração `0007_grid_srid` cria a FK `cell_layers.srid → spatial_ref_sys(srid)`.
-Se a extensão **PostGIS** foi criada por outro role (ex.: `postgres` no docker /
-instalador EDB) e a aplicação conecta com um role próprio, conceda a referência
-**antes** de migrar:
+```sh
+cargo build -p ta-cli
+target/debug/ta-cli doctor      # exit 0 = ambiente ok
+target/debug/ta-cli migrate     # schema (idempotente)
+target/debug/ta-cli seed-demo   # projeto `demo`
+```
+
+## 3. Migrações
+
+As migrações vivem em `crates/ta-db/migrations/` (`0001`–`0014`) e são
+**embutidas** no binário. Aplicação:
+
+- automática no primeiro comando que abre o banco (`doctor`, `migrate`,
+  `seed-demo`, CLI do fluxo, GUI); ou
+- explícita:
+
+```sh
+ta-cli migrate --to postgres://ta:ta@127.0.0.1:55432/ta
+ta-cli migrate --to … --dry-run          # só lista
+```
+
+O controle é a tabela `_sqlx_migrations`; reaplicar é idempotente
+(`nada pendente`). O `doctor` mostra `migrações 14/14 aplicadas`.
+
+### Privilégio de `spatial_ref_sys` (role separado)
+
+A migração `0007_grid_srid` cria `cell_layers.srid → spatial_ref_sys(srid)`.
+Se a extensão PostGIS foi criada por **outro role** (ex.: `postgres`) e a
+aplicação usa um role diferente, a migração falha com `permission denied`.
+Resolva de uma das duas formas:
 
 ```sql
+-- (a) recomendado: criar a extensão com o role da aplicação
+CREATE EXTENSION IF NOT EXISTS postgis;
+
+-- (b) se a extensão já existe e é de outro role:
 GRANT REFERENCES ON spatial_ref_sys TO <app_role>;
 ```
 
-(Alternativa: criar a extensão com o role da aplicação, que fica como owner.)
-Sem o grant, `ta-cli migrate` falha na `0007` com
-`permission denied for table spatial_ref_sys`.
+## 4. Testes
 
----
-
-## Primeiro run (todos os OS)
-
-### Do fonte, em UM comando (recomendado)
+Suíte unitária + integração sem banco (testes PG imprimem “skipped” e passam):
 
 ```sh
-bash scripts/dev-up.sh        # banco + schema + validação + projeto `demo`
-bash scripts/dev-up.sh --gui  # o mesmo e abre o app (precisa de display)
+cargo test --workspace
 ```
 
-O script provisiona o banco sozinho (docker quando existe; cluster PG16 +
-PostGIS 3.4 efêmero via conda quando não), roda `ta-cli migrate`, **exige
-`ta-cli doctor` com exit 0** e cria o projeto de demonstração `demo` (AOI +
-pontos em 3 classes + grade provisória) a partir de `testdata/monitoring/`.
-É idempotente — rodar de novo não duplica banco nem dados, e serve também como
-verificação do ambiente:
+Suíte com **PostGIS real** (gated por `TA_TEST_PG=1`):
 
 ```sh
-ta-cli doctor     # exit 0 = pronto; exit != 0 = o relatório diz o que fazer
-ta-cli migrate    # aplica o schema (idempotente)
-ta-cli seed-demo  # recria/verifica o projeto `demo`
+TA_TEST_PG=1 TA_PG_DSN=postgres://ta:ta@127.0.0.1:55432/ta \
+    cargo test --workspace
 ```
 
-Na GUI, a URL do banco já vem preenchida via `TA_DATABASE_URL`: clique
-**Conectar** e **Ctrl+O** para abrir o projeto `demo`.
+Atalho que sobe o cluster, roda a suíte gated e derruba:
 
-### Passo a passo manual
+```sh
+bash scripts/test-pg.sh
+```
 
-1. **Conectar** — abra o Curupira GIS; no diálogo de conexão use a URL do
-   passo anterior (ou confie em `TA_DATABASE_URL`). O app aplica as migrações
-   no primeiro uso.
-2. **Criar projeto** — botão *Projetos*: cada projeto é um namespace de
-   camadas no banco (SRID de trabalho 4674 — SIRGAS 2000).
-3. **Importar um fixture** — menu *Camada → Importar…* (ou CLI):
+> O `test-pg.sh` **recusa** se a porta `55432` já estiver em uso
+> (`porta 55432 já está em uso`). Nesse caso reuse o cluster existente com o
+> `TA_TEST_PG=1 …` acima, ou escolha outra porta:
+> `TA_PG_PORT=55433 bash scripts/test-pg.sh`.
 
-   ```sh
-   # vetores de exemplo que acompanham o repo:
-   ta-cli import-vector --input testdata/fixtures_vector.geojson --project minha-area
-   ta-cli import-vector --input testdata/fixtures_points.csv --project minha-area
-   # raster (metadados no banco; pixels ficam no filesystem):
-   ta-cli import-raster --input testdata/fixtures_raster.tif --project minha-area
-   ```
+Verificação de qualidade completa:
 
-4. **Ver no mapa** — a camada importada aparece no dock; *Zoom to extent*
-   enquadra; a tabela atributiva abre com duplo clique na camada.
-5. (Opcional) **Basemap WMS** — ative a feature `wms` no build e configure
-   um servidor WMS 1.3.0; o cache em disco evita recomprar tiles iguais.
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo deny check
+```
 
-### Fluxo de monitoramento (CLI)
+## 5. Build de release (sem `DATABASE_URL`)
 
-`phase create`, `aoi create`, `grid create --resolution … [--srid …]`,
-`grid info`, `cell block` e `cell list-blocked` — com exemplos reais (0.005° →
-118 células; `--srid 5880 --resolution 500` → 144) e a nota de unidades por SRS
-— estão em
-[README › Fluxo de monitoramento (CLI)](README.md#fluxo-de-monitoramento-cli).
+```sh
+cargo build --release -p ta-gui -p ta-cli
+# binários: target/release/curupira-gis e target/release/ta-cli
+```
 
----
+Não há `DATABASE_URL` em tempo de compilação: as migrações são embutidas. O
+build de release **não** conecta ao banco; a conexão é escolhida em runtime
+(diálogo da GUI ou `--dsn`/`TA_PG_DSN`).
 
-## Solução de problemas
+## 6. Troubleshooting
 
-| Sintoma | Causa provável | Correção |
-|---|---|---|
-| `ta-cli doctor` sai ≠ 0 | banco fora, PostGIS ausente, migração pendente, GDAL ou permissão de escrita | a própria linha `→` do relatório diz o que fazer; depois `ta-cli migrate` e repita |
-| `ta-cli doctor` acusa "faltam N migração(ões)" | schema não aplicado neste banco | `ta-cli migrate --to <dsn>` (idempotente) |
-| `gdal.dll` / `libgdal.so.X` não encontrado | GDAL ausente (Linux/build do fonte) | `apt install libgdal-dev` / instale GDAL 3.8+ |
-| App abre, raster não projeta | `share\proj` removido do zip ou `PROJ_LIB` sobrescrito | reinstale o zip; não defina `PROJ_LIB` manualmente |
-| `no pg_hba.conf entry` / auth falha | senha/host errados no DSN | revise `TA_DATABASE_URL`; no Windows a senha é a do instalador EDB |
-| `postgis` extension ausente | StackBuilder não instalou PostGIS | rode `CREATE EXTENSION postgis;` como superuser |
-| Fonte/acentos quebrados no CSV | encoding ≠ UTF-8 | use `--encoding latin1` no import (CLI) |
-| `permission denied for table spatial_ref_sys` no `migrate` | FK da `0007` criada com PostGIS de outro role | `GRANT REFERENCES ON spatial_ref_sys TO <app_role>;` (ver seção acima) |
+| Sintoma | Causa / solução |
+|---|---|
+| `porta 55432 já está em uso` | Já há cluster conda/dev no ar. Reuse com `TA_PG_DSN=postgres://ta:ta@127.0.0.1:55432/ta` ou use `TA_PG_PORT=55433`. |
+| `doctor` sai **1** | Leia as linhas `!`/`✗`: cada uma traz a ação. Rode `ta-cli migrate` antes de concluir que falta schema. |
+| `! mvt ST_AsMVT indisponível` | PostGIS sem **protobuf-c** (build conda). Tiles vetoriais ficam off; o resto funciona. Use a imagem `postgis/postgis:16-3.4` para MVT. |
+| `permission denied for ... spatial_ref_sys` | Ver §3 (`GRANT REFERENCES ON spatial_ref_sys`). |
+| GUI fecha com `WinitEventLoop … DISPLAY` | Não há display. Rode em desktop ou use os testes headless. |
+| Senha aparece mascarada | É intencional: saídas e `logs` mostram `postgres://user:***@host`. O valor real só existe no ambiente do processo. |
+| `docker` ausente | Esperado: o `dev-up.sh` cai no conda; `scripts/test-pg.sh` provisiona PG16+PostGIS no `$HOME` (única instalação do workflow). |
+| GDAL não encontrada no build | Instale `libgdal-dev` (Linux) / `gdal` (brew). O link é dinâmico; o `doctor` confirma a versão. |
+
+## 7. Onde está o quê
+
+- Fluxo e comandos: [`README.md`](README.md) §“Fluxo completo pela CLI”.
+- Matriz de paridade e limitações: [`docs/PARITY.md`](docs/PARITY.md).
+- Estado das fases e dívidas: `.pantheon/deepwork/terraamazon-cleanroom-rust/STATUS.md`.

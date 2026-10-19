@@ -196,7 +196,7 @@ pub fn decimate_indices(n: usize, stride: usize) -> Vec<usize> {
         i += stride;
     }
     let last = n - 1;
-    if *out.last().expect("n > 0 garante out não vazio") != last {
+    if out.last().copied() != Some(last) {
         out.push(last);
     }
     out

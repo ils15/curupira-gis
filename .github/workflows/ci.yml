@@ -84,6 +84,36 @@ jobs:
       - name: Testes gated contra o service
         run: cargo test --workspace
 
+      # Fase 6a — cobertura INFORMATIVA (não-gating). Roda contra o service
+      # PostGIS para não subestimar os repositórios de `ta-db`. A ferramenta
+      # é opcional: se o rustup/cargo install falharem (rede, runner sem
+      # llvm-tools), o step apenas avisa — nunca derruba o CI.
+      - name: cobertura (não-gating, informativa)
+        continue-on-error: true
+        run: |
+          if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
+            rustup component add llvm-tools-preview || true
+            cargo install --locked cargo-llvm-cov || true
+          fi
+          if command -v cargo-llvm-cov >/dev/null 2>&1; then
+            mkdir -p target/coverage
+            cargo llvm-cov --workspace --lcov --output-path target/coverage/lcov.info
+            cargo llvm-cov report --html --output-dir target/coverage/html
+          else
+            echo "::warning::cargo-llvm-cov indisponível — cobertura não medida neste run"
+          fi
+
+      - name: publica artefato de cobertura (não-gating)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: coverage
+          path: |
+            target/coverage/lcov.info
+            target/coverage/html
+          if-no-files-found: ignore
+
       # Fase 0 — baseline de performance do ta-db. NÃO-GATING de propósito:
       # números informativos (publicados em benches/BASELINE.md), medidos em
       # runner compartilhado; um pico de ruído não pode derrubar o CI. Fica no

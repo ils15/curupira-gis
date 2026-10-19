@@ -73,7 +73,7 @@ pub fn spawn_import(
     let (tx, rx) = std::sync::mpsc::channel::<ImportMsg>();
     let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
     let job_stage = stage_reading.clone();
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("ta-import".into())
         .spawn(move || {
             run_import(
@@ -84,8 +84,12 @@ pub fn spawn_import(
                 &stage_reading,
                 &stage_normalizing,
             )
-        })
-        .expect("spawn da thread de import (recursos de thread do SO)");
+        });
+    if let Err(err) = spawned {
+        // Sem thread, `tx` cai com a closure e `rx` desconecta (import
+        // reportado como vazio). Falha de SO não derruba o processo.
+        eprintln!("ta-gui: falha ao iniciar a thread de import: {err}");
+    }
     ImportJob {
         rx,
         stage: job_stage,

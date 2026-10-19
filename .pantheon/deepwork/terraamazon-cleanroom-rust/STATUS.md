@@ -1038,12 +1038,13 @@ domain-first**; não substitui nem reescreve o histórico v0.1–v0.2.2 acima.
 | 1 | Projeto / Fase / AOI / Células bloqueadas (`0005`, `0006`, `0007`, `0008`) | **implementada e revisada** (Themis, 2026-10-18: aprovada com ressalvas); achados aplicados, **aguardando commit** |
 | 2 | Classes e regras/rulesets (`0009`, `0010`, `0011_rule_class_restrict`) | **implementada; revisão Themis aplicada** (2026-10-18), **aguardando commit** |
 | 3 | Fila de processos + classificação básica (`0012_queue`, `0013_drafts_measures`) | **implementada; revisão Themis aplicada** (2026-10-18/19), **aguardando commit** — 306 testes; 13/13 migrações; grade de 118 células; retomada e claim concorrente provados |
-| 4 | Scenes / exchange (`0014_scenes`) — paralelizável após a Fase 1 | **pendente** |
-| 5 | Área, import/export e visualização | **pendente** |
-| 6 | Paridade comportamental e fechamento | **pendente** |
+| 4 | Scenes / exchange (`0014_scenes`) — paralelizável após a Fase 1 | **implementada, revisada e commitada** (`e7feb87`) |
+| 5 | Área, import/export e visualização (5a + 5b) | **concluída e commitada** (`318e7fe`, `75d921d`) |
+| 6 | Paridade comportamental e fechamento | **concluída** (6a + 6b, 2026-10-19, sem commit): métricas/hardening + matriz e docs finais |
 
-**Fase 0 concluída; Fases 1–3 implementadas/revisadas, aguardando commit.**
-Fases 4–6 não iniciadas. Nenhum ADR criado (não solicitado).
+**Fases 0–6 concluídas.** Nenhum ADR criado (não solicitado). A matriz de
+paridade está em `docs/PARITY.md` (versão de trabalho em
+`PARITY-MATRIX.md`).
 
 ### Fechamento da revisão da Fase 1 (2026-10-18)
 
@@ -1420,3 +1421,236 @@ deleção (join com projects zeraria trivialmente) e cena global sobrevivente.
 "skipped") · `dev-up.sh` 2× idempotente (doctor exit 0).
 
 **Nada commitado** — o usuário faz commits manualmente.
+
+## Fase 6a — hardening e métricas (CONCLUÍDA, 2026-10-19, @hermes/@nyx)
+
+Escopo desta rodada: fechar dívida de teste conhecida, medir cobertura/bench,
+endurecer CI e auditar (`deny`/`unwrap`/duplicatas). **A matriz de paridade e a
+documentação final são a 6b e NÃO foram escritas aqui.** Nada commitado.
+
+### 1. Dívida de teste do `reset_demo` — CORRIGIDA
+
+- **Causa raiz confirmada:** `DELETE FROM projects WHERE name='demo'` cru
+  falha com `rules.class_id ON DELETE RESTRICT` (0011) assim que o demo tem
+  ruleset/regra. O reset agora usa o caminho ORDENADO do produto
+  (`project delete --project demo --yes`) e tolera projeto ausente.
+- **Teste de regressão novo** (`dev_up_integration.rs`):
+  `reset_funciona_com_projeto_rico_em_rules_e_task` — cria classe → ruleset →
+  regra → task `classify` → `task run` (118 processos/células, status `done`,
+  log por célula > 0) → reset pelo caminho ordenado → projeto ausente →
+  `seed-demo` de novo → 2 camadas / 3 classes / 1 AOI / 1 grade / 118 células.
+  Esse é exatamente o estado que quebrava o DELETE cru.
+- **Corrida entre testes:** os dois testes que apagam/resemeiam `demo` rodam
+  em paralelo no mesmo banco. Um `tokio::sync::Mutex` estático
+  (`DEMO_LOCK`, feature `sync` do tokio no workspace) serializa os dois.
+  Sem isso, a primeira execução da cobertura falhou de forma reproduzível
+  (`projeto demo não existe mais`).
+- **Prova:** suíte gated executada **2×** — 369 testes em 35 alvos
+  (21 integração + 7 unit + 7 doc-tests), 0 ignored; os **3 testes de MVT
+  auto-pulam** neste host (sem protobuf-c) e a prova real é o job `linux-pg`
+  do CI. `reset_funciona...` ok nas duas.
+
+### 2. Cobertura — metas do §8 ATINGIDAS (medida real)
+
+Ferramentas instaladas com sucesso nesta máquina: `rustup component add
+llvm-tools-preview` e `cargo install cargo-llvm-cov --locked` (**0.9.1**,
+~1 min). Comando (Postgres real, não subestima os repos):
+
+```sh
+TA_TEST_PG=1 TA_PG_DSN=postgres://ta:ta@127.0.0.1:55432/ta \
+  cargo llvm-cov --workspace --json --output-path /tmp/opencode/cov.json
+```
+
+| escopo | cobertura de linhas | linhas |
+|---|---|---|
+| **global do workspace** | **73,48%** | 15 657 / 21 309 |
+| **`ta-engine`** | **98,53%** | 874 / 887 |
+| **`ta-db` inteiro** | **91,97%** | 2 441 / 2 654 |
+| **`ta-db` `repo_*.rs`** | **92,61%** | 2 104 / 2 272 |
+| `ta-core` | 96,77% | 600 / 620 |
+| `ta-gis` | 75,38% | 1 583 / 2 100 |
+| `ta-flow` | 73,14% | 749 / 1 024 |
+| `ta-cli` | 72,02% | 3 225 / 4 478 |
+| `ta-gui` | 64,79% | 6 185 / 9 546 |
+
+Por arquivo de repo (todos ≥85%): `repo_aoi` 100%, `repo_area` 100%,
+`repo_phase` 100%, `repo_class` 99,65%, `repo_task` 94,80%, `repo_scene`
+94,59%, `repo.rs` 90,89%, `repo_cell` 88,05%, `repo_ruleset` 85,11%.
+**Nenhuma invenção:** números do relatório JSON do `cargo-llvm-cov`; a
+ferramenta conta também linhas de módulos `#[cfg(test)]` (método padrão, sem
+exclusão) — o que, se algo, torna o número conservador para o código de
+produção.
+
+**CI:** novo passo `cobertura (não-gating, informativa)` no job `linux-pg`
+(service PostGIS), `continue-on-error: true`, instala a ferramenta só se
+ausente e, se indisponível, emite `::warning::`; artefato `coverage`
+(lcov + html) publicado com `if-no-files-found: ignore`. Não quebra o CI se
+a ferramenta faltar.
+
+### 3. Benchmarks — re-medidos (detalhe em `benches/BASELINE.md`)
+
+Banco **limpo por execução** (`ta_bench` recriado), mesmo host da baseline
+(Xeon Gold 5120, 52 vCPU, 472 GiB), commit `75d921d`, `ta-db` 3× — mediana
+das médias vs baseline de 2026-10-18:
+
+| cenário | mediana | Δ vs baseline |
+|---|---|---|
+| `bulk_insert/10k` | 511,5 ms | +2,1% (ruído) |
+| `bbox_query/janela_viewport` | 12,57 ms | +3,6% |
+| `list_with_ids/10k` | 28,21 ms | +8,2% |
+| `mvt_tile/z12` | **não medido** | PostGIS conda sem protobuf-c |
+
+`ta-gui` headless: 1,76 / 2,47 / 5,53 / 0,01 ms (mean) — melhor que a
+baseline de 2026-10-16 (−14,6% / −2,4% / −20,5% / 0%); p95 pior 5,91 ms,
+~5,6× abaixo do gatilho de 33 ms (Fase 3b continua não disparada).
+**Observação metodológica:** medir no banco de trabalho acumulado (491 499
+features de testes) inflava o `bbox_query` para 28 ms por causa do GIST
+global; em banco limpo volta a ~12,6 ms. Por isso o protocolo exige DB limpo.
+
+### 4. CI / release — revisados
+
+- `.github/workflows/ci.yml`: YAML válido (parseado com PyYAML); jobs
+  `linux` (fmt/clippy/test/deny), `linux-pg` (gated + bench + **cobertura
+  não-gating**) e `windows`; nenhum step de contagem de testes existia (nada
+  a ajustar). O bench continua `continue-on-error: true`.
+- `.github/workflows/release.yml`: confirma os **DOIS** binários em todas as
+  plataformas — Linux tar.gz copia `curupira-gis` **e** `ta-cli`; `.deb`
+  (`[package.metadata.deb]` assets) empacota ambos; Windows zip/instalador
+  copiam `curupira-gis.exe` + `ta-cli.exe`; macOS `bundle.sh` copia os dois.
+- **Migrações embutidas:** `sqlx::migrate!("./migrations")` (sem runtime
+  path). Verificado nesta máquina sem `DATABASE_URL` no ambiente: `ta-cli
+  migrate` aplica 14/14 e a 2ª execução diz "nada pendente".
+
+### 5. Auditorias
+
+- **`cargo deny check`:** `advisories ok, bans ok, licenses ok, sources ok`
+  (nenhum advisory novo a corrigir; ignores existentes de zbus/ttf-parser
+  seguem justificados).
+- **`unwrap`/`expect` em não-teste:** grep em `crates/*/src/**` fora de
+  `#[cfg(test)]` achou **7 ocorrências reais** — **todas corrigidas**:
+  5 `spawn(...).expect(...)` de threads da GUI (agora logam em `stderr` e
+  deixam o canal desconectar; em `db_worker` também marca `alive=false`),
+  1 `out.last().expect(...)` em `viewport` (agora `last().copied()`), 1
+  `ring.last().expect(...)` em `normalizer` (índice após o gate `len >= 4`).
+  Resultado re-grep: **0**. `unwrap_or` e testes não entram na conta.
+- **`cargo tree -d`** (duplicatas relevantes, SEM refactor): `geojson`
+  0.24.2 (via geozero 0.15) vs 1.0.0 (workspace); `sha2` 0.10.9 (workspace)
+  vs 0.11.1 (sqlx-postgres); `thiserror` 1.0.69 (winit/calloop antigos) vs
+  2.0.21 (workspace); `hashbrown` 0.15/0.16/0.17; `rustix` 0.38 (calloop
+  0.13) vs 1.1; `getrandom` 0.3/0.4; `bitflags` 1.3.2 (flatbuffers) vs
+  2.13.2. Todas transitivas de dependências; nenhuma ação nesta fase.
+
+### 6. Verificação real desta rodada
+
+| check | resultado |
+|---|---|
+| `cargo fmt --all -- --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace` | ✅ **369 testes / 35 alvos** (21 integração + 7 unit + 7 doc-tests) |
+| `TA_TEST_PG=1 … cargo test --workspace` **2×** | ✅ 369/369, 0 ignored; **3 testes de MVT auto-pulam** sem protobuf-c (prova real: job `linux-pg` do CI) nas duas |
+| `cargo bench -p ta-db` (3×, DB limpo) | ✅ (MVT pulado com aviso) |
+| `cargo bench -p ta-gui` (headless) | ✅ |
+| `bash scripts/dev-up.sh` **2×** | ✅ exit 0, doctor ok, seed idempotente |
+| `cargo deny check` | ✅ |
+| cobertura global / engine / repos | ✅ 73,48% / 98,53% / 92,61% |
+
+### Pendências honestas (não fechadas aqui)
+
+- **6b:** matriz de paridade comportamental e documentação final.
+- Dedup de helpers de teste **n7/n8/n13** — ainda abertos (fora do escopo
+  desta rodada; a corrida do `demo` foi resolvida por lock, não por dedup).
+- **MVT** continua sem número real neste host (PostGIS conda sem protobuf-c);
+  depende do job `linux-pg` do CI.
+- **GPU** do render não é medida (headless mede tesselação CPU) — limitação
+  já documentada em `benches/map_render.md`.
+
+## Fase 6b — matriz de paridade e documentação final (CONCLUÍDA, 2026-10-19)
+
+Escopo: (1) matriz de paridade comportamental, (2) documentação final do fluxo,
+(3) auditoria das afirmações. **Nada commitado** — o usuário faz commits
+manualmente.
+
+### Entregues
+
+| Arquivo | Conteúdo |
+|---|---|
+| `docs/PARITY.md` | Matriz para o revisor: 10 itens IN (§3.1) com estado, comando reproduzível, teste, arquivos e limitações; tabela OUT (§3.2); fora por barreira (§3.3); “O que NÃO podemos afirmar”; “Como reproduzir”; registro de verificação. |
+| `.pantheon/deepwork/terraamazon-cleanroom-rust/PARITY-MATRIX.md` | Versão de trabalho: mesma matriz + transcritos crus da execução + índice teste→arquivo + lacunas/defeitos. |
+| `README.md` | Visão geral, arquitetura (7 crates + diagrama ASCII), quickstart, fluxo CLI completo, GUI, decisões 2/3/4-retificada/5, qualidade, limitações, clean-room. |
+| `INSTALL.md` | Pré-requisitos, `dev-up.sh`, `test-pg.sh`, migrações, `GRANT REFERENCES ON spatial_ref_sys`, display da GUI, troubleshooting (55432/doctor/senha mascarada), build release sem `DATABASE_URL`. |
+| `STATUS.md` | Este fechamento + tabela de fases atualizada. |
+
+### Resultado da matriz (§3.1)
+
+- **9 itens ✅ verificados**: projeto/fase; AOI; células e bloqueadas; classes
+  e grupos; regras/rulesets; fila com log por célula; classificação básica;
+  área; import/export.
+- **1 item ⚠️ parcial**: **visualização** — contrato headless verificado
+  (overlay/pick/legenda/viewport), **sem inspeção humana por display** (o host
+  não tem `DISPLAY`; o binário encerra com `WinitEventLoop … DISPLAY`).
+- **Nenhum item ❌.**
+
+### Execução real usada como evidência (projeto `parity_flow_demo`)
+
+Fluxo executado do zero e apagado ao final: import AOI (1 feição) → fase →
+AOI → grade 0,005° (**118 células**) → classes/grupos (3/1) → ruleset v1 +
+2 regras → medidas (8) → classificação (**117 processos**, 117 logs, 3
+decisões, 0 erros) → área **3627,54 ha** (bloqueada 30,74; disponível
+3596,80; desmatamento 1 célula/30,74; floresta 2/61,48) → exchange export
+(**35 155 bytes**, contagens completas) → import em projeto novo com **área
+idêntica** → `project delete --yes`.
+
+### Verificação executada (host Linux, 2026-10-19)
+
+| check | resultado |
+|---|---|
+| `cargo fmt --all -- --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace` | ✅ **369 testes / 35 alvos** (21 integração + 7 unit + 7 doc-tests) |
+| `TA_TEST_PG=1 TA_PG_DSN=… cargo test --workspace` | ✅ 369/369, 0 ignored; **3 testes de MVT auto-pulam** sem protobuf-c (prova real: job `linux-pg` do CI) |
+| `bash scripts/dev-up.sh` **2×** | ✅ exit 0, doctor 5 ok/1 aviso (MVT), seed idempotente |
+| `cargo deny check` | ✅ advisories/bans/licenses/sources ok (2 warnings de licença não usada: `CC0-1.0`, `Unicode-DFS-2016`) |
+| `cargo build --release -p ta-gui -p ta-cli` **sem `DATABASE_URL`** | ✅ 36 s; ambos os binários gerados |
+| `ta-cli doctor` | ✅ exit 0 |
+| `ta-cli migrate --dry-run` | ✅ 0 pendentes |
+| fluxo CLI completo | ✅ (números acima) |
+
+### Números de qualidade (Fase 6a, mantidos)
+
+369 testes; cobertura global **73,48%** (15 657/21 309), `ta-engine`
+**98,53%** (874/887), `ta-db` **91,97%** (2 441/2 654), `repo_*.rs`
+**92,61%** (2 104/2 272); bench `bulk_insert/10k` **511,5 ms**,
+`bbox_query` **12,57 ms**, `list_with_ids` **28,21 ms**; **MVT não medido**
+(PostGIS conda sem protobuf-c).
+
+### Dívidas remanescentes (explícitas)
+
+1. **MVT sem número real** neste host — depende do job `linux-pg` do CI
+   (imagem com protobuf-c). Nenhum número inventado.
+2. **Dedup de helpers de teste n7/n8/n13** — ainda aberto (a corrida do
+   `demo` foi resolvida por `DEMO_LOCK`, não por dedup).
+3. **Verificação visual humana** — não feita (sem display). A visualização
+   está verificada por contrato headless, e a matriz a marca ⚠️.
+4. **Escala 1M de células** — dois limites: teto do motor `MAX_CELLS =
+   5 000 000` (`ta-engine/src/grid.rs:64`) e teto de negócio default
+   `projects.max_cells = 1 000 000`; nenhum é capacidade medida; bench cobre
+   10 000 feições.
+5. **`project delete` — atribuição de `draft_layers` (corrigido na Fase 6):**
+   o relatório contava 0 e o total ficava 1 abaixo do preview porque
+   `cell_layers` era apagada antes e `draft_layers.cell_layer_id` é
+   `ON DELETE CASCADE`. A ordem passou a apagar `draft_layers` antes de
+   `cell_layers`; regressão em
+   `flow_fase4_cli::project_delete_ordena_e_zera_banco` (preview == total,
+   `draft_layers=1`).
+6. **Cobertura `ta-gui` 64,79% / `ta-cli` 72,02%** — abaixo de 85%, mas a meta
+   de 85% do §8 é para `ta-engine`/`repo_*.rs`; a global (70%) é atingida.
+7. **Regras sem predicado geoespacial/temporal** — o motor avalia medidas
+   numéricas; documentado como limitação de escopo.
+
+### Clean-room
+
+`docs/PARITY.md`, `README.md` e `INSTALL.md` foram revisados por grep: não
+citam binário/instalador, offsets, `hex dumps`, assembly, pseudocódigo,
+símbolos internos nem o hash do pacote legado. As referências ao produto de
+referência são comportamentais e genéricas; a matriz usa o plano aprovado e
+evidência do nosso sistema.
